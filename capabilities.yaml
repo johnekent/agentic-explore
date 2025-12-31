@@ -1,0 +1,97 @@
+capabilities:
+  - id: cap.persistence
+    description: Read/write structured rows in SQLite.
+    default_tool: persist_rows
+  - id: cap.query_rows
+    description: Query rows from SQLite (read-only).
+    default_tool: query_rows
+  - id: cap.file_read
+    description: Read local files.
+    default_tool: read_file
+  - id: cap.file_write
+    description: Write local files.
+    default_tool: write_file
+  - id: cap.indexing
+    description: Index documents into SQLite.
+    default_tool: index_document
+  - id: cap.index_document
+    description: Index documents into SQLite.
+    default_tool: index_document
+  - id: cap.local_exec
+    description: Execute local subprocess commands.
+    default_tool: local_exec
+  - id: cap.llm_generate
+    description: Generate text via local LLM (Ollama).
+    default_tool: llm_generate
+  - id: cap.ops_logging
+    description: Record agent runs and tool calls.
+    default_tool: ops_log
+  - id: cap.web_search
+    description: Perform web search (DuckDuckGo).
+    default_tool: search_web
+  - id: cap.http_fetch
+    description: Fetch URL content over HTTP.
+    default_tool: fetch_url
+  - id: cap.file_list
+    description: List files within a directory or glob.
+    default_tool: list_files
+  - id: cap.db_migrate
+    description: Apply SQLite migrations for a workspace.
+    default_tool: migrate_db
+  - id: cap.update_rows
+    description: Update rows in SQLite.
+    default_tool: update_rows
+  - id: cap.delete_rows
+    description: Delete rows in SQLite.
+    default_tool: delete_rows
+  - id: cap.index_idea
+    description: Index ideas into SQLite.
+    default_tool: index_idea
+  - id: cap.match_idea_to_docs
+    description: Match a single idea to documents and persist matches.
+    default_tool: match_idea_to_docs
+  - id: cap.match_doc_to_ideas
+    description: Match a single document to ideas and persist matches.
+    default_tool: match_doc_to_ideas
+  - id: cap.plan_match_execution
+    description: Create a task from a reviewed match.
+    default_tool: plan_match_execution
+  - id: cap.plan_backlog
+    description: List active tasks for planning.
+    default_tool: plan_backlog
+  - id: cap.plan_update_status
+    description: Update task status.
+    default_tool: plan_update_status
+  - id: cap.plan_assign_agent
+    description: Assign an agent to a task.
+    default_tool: plan_assign_agent
+  - id: cap.judge_validity
+    description: Produce a validity report for matches.
+    default_tool: judge_validity
+  - id: cap.build_dashboard
+    description: Build the dashboard markdown output.
+    default_tool: build_dashboard
+  - id: cap.cleanup_db
+    description: Clean up stale database references.
+    default_tool: cleanup_db
+  - id: cap.list_document_duplicates
+    description: Detect potential duplicate documents.
+    default_tool: list_document_duplicates
+  - id: cap.delete_duplicate_documents
+    description: Delete duplicate documents and their files.
+    default_tool: delete_duplicate_documents
+  - id: cap.vector_index
+    description: Build vector embeddings for documents and ideas.
+    default_tool: vector_index
+  - id: cap.vector_query
+    description: Query vector embeddings for semantic search.
+    default_tool: vector_query
+  - id: cap.vector_stats
+    description: Report vector embedding counts.
+    default_tool: vector_stats
+  - id: cap.env_check_db
+    description: Validate workspace DB readiness and disk space.
+    default_tool: env_check_db
+  - id: cap.env_check_llm
+    description: Validate LLM provider availability.
+    default_tool: env_check_llm

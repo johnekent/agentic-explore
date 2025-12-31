@@ -1,0 +1,19 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Dict
+
+from agentlab.skills_runtime.base import Skill, SkillSpec
+
+
+@dataclass
+class ScoreOpportunity(Skill):
+    spec = SkillSpec(name="score_opportunity", required_capabilities=["cap.llm_generate"])
+
+    def run(self, orch, **kwargs) -> Dict[str, Any]:
+        system = "Score opportunity 0-10. Return JSON {\"score\": number, \"reason\": \"...\"}."
+        user = kwargs.get("text", "")[:2000]
+        result = orch.use("cap.llm_generate", system=system, user=user, temperature=0.2)
+        if not result.ok:
+            return {"ok": False, "error": result.error}
+        return {"ok": True, "raw": result.data.get("text", "")}

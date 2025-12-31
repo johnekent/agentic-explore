@@ -1,0 +1,14 @@
+workspace/
+workspace/runs/
+workspace/exports/
+workspace/content/
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+.env
+config.local.yaml
+.venv/
+.vscode/
+*.egg-info/
