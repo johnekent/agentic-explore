@@ -9,8 +9,20 @@ from agentlab.tools.types import ToolResult
 
 def _require_ok(result: ToolResult, context: str) -> ToolResult:
     if not result.ok:
+        if _should_ignore_ops_error(result, context):
+            return result
         raise RuntimeError(f"{context}: {result.error}")
     return result
+
+
+def _should_ignore_ops_error(result: ToolResult, context: str) -> bool:
+    if context not in {"ops_end", "ops_tool_call"}:
+        return False
+    error = result.error or {}
+    if error.get("code") != "ops_log_error":
+        return False
+    message = str(error.get("message", "")).lower()
+    return "database is locked" in message or "foreign key constraint failed" in message
 
 
 def start_ops_run(

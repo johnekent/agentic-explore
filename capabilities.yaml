@@ -74,6 +74,9 @@ capabilities:
   - id: cap.cleanup_db
     description: Clean up stale database references.
     default_tool: cleanup_db
+  - id: cap.delete_all_data
+    description: Delete all rows from the SQLite database.
+    default_tool: delete_all_data
   - id: cap.list_document_duplicates
     description: Detect potential duplicate documents.
     default_tool: list_document_duplicates

@@ -11,8 +11,8 @@ If memory is lost: read `ARCHITECTURE_TARGET.md` first, then execute the Next St
 ## Target Mapping (operations.py -> skills/tools)
 
 - `init_db` -> skill `init_workspace` -> tool `migrate_db`
-- `list_runs` -> skill `list_runs` -> tool `list_files` + `read_file`
-- `load_run` -> skill `load_run` -> tool `read_file`
+- `list_runs` -> skill `list_runs` -> tool `query_rows`
+- `load_run` -> skill `load_run` -> tool `query_rows`
 - `list_skills` -> skill `list_skills` -> tool `list_files` + `read_file`
 - `create_skill` -> skill `create_skill` -> tool `write_file`
 - `list_document_duplicates` -> skill `list_document_duplicates` -> tool `list_document_duplicates`
@@ -36,6 +36,7 @@ If memory is lost: read `ARCHITECTURE_TARGET.md` first, then execute the Next St
 - `plan_update` -> skill `plan_update_status` -> tool `plan_update_status`
 - `plan_assign` -> skill `plan_assign_agent` -> tool `plan_assign_agent`
 - `cleanup_db` -> skill `cleanup_db` -> tool `cleanup_db`
+- `delete_all_data` -> skill `delete_all_data` -> tool `delete_all_data`
 - `demo_seed` -> skill `demo_seed` -> tools `write_file`, `persist_rows`, `index_document`, `index_idea`
 
 ## Capabilities to Add (gap list)
@@ -49,6 +50,7 @@ Add these to `capabilities.yaml`, with tools in `agentlab/tools/*`:
 - `cap.vector_index` -> `vector_index` (done)
 - `cap.vector_query` -> `vector_query` (done)
 - `cap.vector_stats` -> `vector_stats` (done)
+- `cap.delete_all_data` -> `delete_all_data` (done)
 
 ## Next Steps (recommended order)
 
@@ -72,3 +74,4 @@ Add these to `capabilities.yaml`, with tools in `agentlab/tools/*`:
 - Windows note: Docker Desktop must be running for Docker-based startup to succeed.
 - Status logging: long-running skills now emit `agent_interactions` entries via ops logging, and UI/CLI can attach live log callbacks for progress visibility.
 - Summarization fallback: adaptive chunking based on `OLLAMA_TIMEOUT_S` to reduce timeouts (map-reduce style).
+- Runs now persist in SQLite (`runs` table). `workspace/runs` is deprecated for new data.

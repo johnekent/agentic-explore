@@ -29,7 +29,7 @@ class Workspace:
 
 def ensure_workspace(root: Path) -> Workspace:
     ws = Workspace(root=root)
-    for p in [ws.documents, ws.ideas, ws.matches, ws.index, ws.runs, ws.exports]:
+    for p in [ws.documents, ws.ideas, ws.matches, ws.index, ws.exports]:
         p.mkdir(parents=True, exist_ok=True)
     return ws
 

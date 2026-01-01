@@ -9,6 +9,7 @@ from agentlab.services.operations import (
     build_embeddings as svc_build_embeddings,
     cleanup_db as svc_cleanup_db,
     create_idea as svc_create_idea,
+    delete_all_data as svc_delete_all_data,
     demo_seed as svc_demo_seed,
     fetch_run as svc_fetch_run,
     index_docs as svc_index_docs,
@@ -46,7 +47,7 @@ def search(query: str, workspace: Path = WS_DEFAULT, top_n: int = 10):
     ctx = OpsContext("agentlab-cli", "cli")
     result = svc_search_web(ctx, query, workspace, top_n=top_n)
     typer.echo(f"run_id={result['run_id']}")
-    typer.echo(result["run_path"])
+    typer.echo("Run stored in database.")
 
 @app.command("search-local")
 def search_local(query: str, workspace: Path = WS_DEFAULT, limit: int = 20):
@@ -231,6 +232,18 @@ def cleanup_db(
 ):
     ctx = OpsContext("agentlab-cli", "cli")
     report = svc_cleanup_db(ctx, workspace, dry_run=dry_run)
+    typer.echo(json.dumps(report, indent=2))
+
+@app.command("delete-all-data")
+def delete_all_data(
+    workspace: Path = WS_DEFAULT,
+    yes: bool = typer.Option(False, "--yes", help="Confirm deleting all database data."),
+    delete_files: bool = typer.Option(True, "--delete-files/--keep-files", help="Delete document/idea files on disk."),
+):
+    if not yes:
+        typer.confirm("Delete ALL data from the database? This cannot be undone.", abort=True)
+    ctx = OpsContext("agentlab-cli", "cli")
+    report = svc_delete_all_data(ctx, workspace, delete_files=delete_files)
     typer.echo(json.dumps(report, indent=2))
 
 @demo_app.command("seed")

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 from typing import Any
 
 from agentlab.core.paths import ensure_workspace
 from agentlab.db.db import connect
+from agentlab.pipeline.embeddings import load_vec_extension
 
 
 def cleanup_db_records(ws_root: Path, *, dry_run: bool = True) -> dict[str, Any]:
@@ -66,4 +68,54 @@ def cleanup_db_records(ws_root: Path, *, dry_run: bool = True) -> dict[str, Any]
         con.commit()
 
     con.close()
+    return report
+
+
+def delete_all_data_records(ws_root: Path, *, delete_files: bool = True) -> dict[str, Any]:
+    """
+    Delete all rows from every user table in the SQLite database.
+    """
+    ws = ensure_workspace(ws_root)
+    con = connect(ws.db_path)
+    doc_paths = [r["content_path"] for r in con.execute("SELECT content_path FROM documents").fetchall()]
+    idea_paths = [r["content_path"] for r in con.execute("SELECT content_path FROM ideas").fetchall()]
+    con.execute("PRAGMA foreign_keys = OFF")
+    table_rows = con.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    tables = [r["name"] for r in table_rows]
+    if any(r["sql"] and "vec0" in r["sql"].lower() for r in table_rows):
+        load_vec_extension(con)
+    report: dict[str, Any] = {"tables": {}}
+    for table in tables:
+        safe_name = table.replace('"', '""')
+        cur = con.execute(f'DELETE FROM "{safe_name}"')
+        report["tables"][table] = int(cur.rowcount if cur.rowcount != -1 else 0)
+    con.commit()
+    con.execute("PRAGMA foreign_keys = ON")
+    con.close()
+    if delete_files:
+        deleted = 0
+        missing = 0
+        for path_str in doc_paths + idea_paths:
+            try:
+                path = Path(path_str)
+                if path.exists():
+                    path.unlink()
+                    deleted += 1
+                else:
+                    missing += 1
+            except Exception:
+                missing += 1
+        report["files_deleted"] = deleted
+        report["files_missing"] = missing
+        runs_dir = ws_root / "runs"
+        if runs_dir.exists():
+            try:
+                shutil.rmtree(runs_dir)
+                report["runs_deleted"] = True
+            except Exception:
+                report["runs_deleted"] = False
+    report["total_tables"] = len(tables)
+    report["total_rows"] = sum(report["tables"].values())
     return report

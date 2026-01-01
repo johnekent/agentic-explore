@@ -72,6 +72,7 @@ This is intentionally **not** an autonomous system. Humans remain the final judg
 - **Markdown + YAML frontmatter** = system of record
 - **SQLite** = searchable index and relational glue
 - SQLite enforces **foreign key integrity**
+- Search runs are stored in SQLite (`runs` table) for UI/CLI selection
 
 ### Matching
 - Bidirectional:

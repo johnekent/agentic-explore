@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from datetime import datetime
@@ -76,7 +77,7 @@ class InitWorkspace(Skill):
 
 
 class ListRuns(Skill):
-    spec = SkillSpec(name="list_runs", required_capabilities=["cap.file_list", "cap.file_read", "cap.ops_logging"])
+    spec = SkillSpec(name="list_runs", required_capabilities=["cap.query_rows", "cap.ops_logging"])
 
     def run(
         self,
@@ -97,34 +98,34 @@ class ListRuns(Skill):
         )
         status = "completed"
         try:
-            runs_root = Path(workspace) / "runs"
             list_res = use_tool(
                 orch,
-                capability="cap.file_list",
+                capability="cap.query_rows",
                 run_id=ops_run_id,
                 skill_name=self.spec.name,
-                parameters={"root": str(runs_root), "pattern": "run_*/run.yaml"},
-                root=str(runs_root),
-                pattern="run_*/run.yaml",
+                sql=(
+                    "SELECT run_id, topic, started_at, ended_at, params_json, outputs_json "
+                    "FROM runs ORDER BY started_at DESC LIMIT ?"
+                ),
+                params=[limit],
+                db_path=_db_path(workspace),
             )
             if not list_res.ok:
                 raise RuntimeError(list_res.error)
-            files = sorted(list_res.data.get("files", []), reverse=True)[:limit]
             runs = []
-            for path in files:
-                read_res = use_tool(
-                    orch,
-                    capability="cap.file_read",
-                    run_id=ops_run_id,
-                    skill_name=self.spec.name,
-                    parameters={"path": path},
-                    path=path,
+            for row in list_res.data.get("rows", []):
+                params = row.get("params_json") or ""
+                outputs = row.get("outputs_json") or ""
+                runs.append(
+                    {
+                        "run_id": row.get("run_id"),
+                        "topic": row.get("topic"),
+                        "started_at": row.get("started_at"),
+                        "ended_at": row.get("ended_at"),
+                        "params": json.loads(params) if params else {},
+                        "outputs": json.loads(outputs) if outputs else {},
+                    }
                 )
-                if not read_res.ok:
-                    raise RuntimeError(read_res.error)
-                data = yaml.safe_load(read_res.data.get("content") or "") or {}
-                data["run_path"] = path
-                runs.append(data)
             return runs
         except Exception:
             status = "error"
@@ -134,7 +135,7 @@ class ListRuns(Skill):
 
 
 class LoadRun(Skill):
-    spec = SkillSpec(name="load_run", required_capabilities=["cap.file_read", "cap.ops_logging"])
+    spec = SkillSpec(name="load_run", required_capabilities=["cap.query_rows", "cap.ops_logging"])
 
     def run(
         self,
@@ -155,20 +156,31 @@ class LoadRun(Skill):
         )
         status = "completed"
         try:
-            run_path = Path(workspace) / "runs" / f"run_{run_id}" / "run.yaml"
             read_res = use_tool(
                 orch,
-                capability="cap.file_read",
+                capability="cap.query_rows",
                 run_id=ops_run_id,
                 skill_name=self.spec.name,
-                parameters={"path": str(run_path)},
-                path=str(run_path),
+                sql="SELECT run_id, topic, started_at, ended_at, params_json, outputs_json FROM runs WHERE run_id = ? LIMIT 1",
+                params=[run_id],
+                db_path=_db_path(workspace),
             )
             if not read_res.ok:
-                raise ValueError("run.yaml not found for run_id")
-            data = yaml.safe_load(read_res.data.get("content") or "") or {}
-            data["run_path"] = str(run_path)
-            return data
+                raise RuntimeError(read_res.error)
+            rows = read_res.data.get("rows", [])
+            if not rows:
+                raise ValueError("run not found for run_id")
+            row = rows[0]
+            params = row.get("params_json") or ""
+            outputs = row.get("outputs_json") or ""
+            return {
+                "run_id": row.get("run_id"),
+                "topic": row.get("topic"),
+                "started_at": row.get("started_at"),
+                "ended_at": row.get("ended_at"),
+                "params": json.loads(params) if params else {},
+                "outputs": json.loads(outputs) if outputs else {},
+            }
         except Exception:
             status = "error"
             raise
@@ -1643,6 +1655,46 @@ class CleanupDb(Skill):
                 parameters={"dry_run": dry_run},
                 workspace=str(workspace),
                 dry_run=dry_run,
+            )
+            if not res.ok:
+                raise RuntimeError(res.error)
+            return res.data or {}
+        except Exception:
+            status = "error"
+            raise
+        finally:
+            end_ops_run(orch, run_id=ops_run_id, status=status)
+
+
+class DeleteAllData(Skill):
+    spec = SkillSpec(name="delete_all_data", required_capabilities=["cap.delete_all_data", "cap.ops_logging"])
+
+    def run(
+        self,
+        orch,
+        *,
+        workspace: Path,
+        delete_files: bool = True,
+        agent_name: str,
+        agent_type: str,
+        parent_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        ops_run_id = start_ops_run(
+            orch,
+            agent_name=agent_name,
+            agent_type=agent_type,
+            purpose="delete-all-data",
+            parent_run_id=parent_run_id,
+        )
+        status = "completed"
+        try:
+            res = use_tool(
+                orch,
+                capability="cap.delete_all_data",
+                run_id=ops_run_id,
+                skill_name=self.spec.name,
+                workspace=str(workspace),
+                delete_files=delete_files,
             )
             if not res.ok:
                 raise RuntimeError(res.error)

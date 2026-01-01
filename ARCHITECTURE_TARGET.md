@@ -39,6 +39,7 @@ Notes:
 - `cap.judge_validity` -> `judge_validity`
 - `cap.build_dashboard` -> `build_dashboard`
 - `cap.cleanup_db` -> `cleanup_db`
+- `cap.delete_all_data` -> `delete_all_data`
 - `cap.list_document_duplicates` -> `list_document_duplicates`
 - `cap.delete_duplicate_documents` -> `delete_duplicate_documents`
 
@@ -61,10 +62,10 @@ Each skill should declare required/optional capabilities in its frontmatter.
 ### Workspace / Runs
 - `init_workspace` -> ensure workspace + migrate DB
   - caps: `cap.file_write`, `cap.db_migrate`, `cap.ops_logging`
-- `list_runs` -> list run YAMLs
-  - caps: `cap.file_list`, `cap.file_read`, `cap.ops_logging`
-- `load_run` -> load a run YAML
-  - caps: `cap.file_read`, `cap.ops_logging`
+- `list_runs` -> list runs from SQLite
+  - caps: `cap.query_rows`, `cap.ops_logging`
+- `load_run` -> load a run from SQLite
+  - caps: `cap.query_rows`, `cap.ops_logging`
 
 ### Skills Lifecycle
 - `list_skills` -> enumerate `skills/*/SKILL.md`
@@ -74,13 +75,13 @@ Each skill should declare required/optional capabilities in its frontmatter.
 
 ### Search, Fetch, Index
 - `search_web_sources` -> perform web search and write run metadata
-  - caps: `cap.web_search`, `cap.file_write`, `cap.ops_logging`
+  - caps: `cap.web_search`, `cap.persist_rows`, `cap.ops_logging`
 - `fetch_documents_from_run` -> fetch URLs for a run
-  - caps: `cap.file_read`, `cap.file_write`, `cap.http_fetch`, `cap.query_rows`, `cap.llm_generate`, `cap.ops_logging`
+  - caps: `cap.file_write`, `cap.http_fetch`, `cap.query_rows`, `cap.update_rows`, `cap.llm_generate`, `cap.ops_logging`
 - `fetch_and_index_urls` -> fetch URLs then index documents
   - caps: `cap.query_rows`, `cap.http_fetch`, `cap.file_write`, `cap.index_document`, `cap.llm_generate`, `cap.ops_logging`
 - `index_documents_from_run` -> index fetched docs
-  - caps: `cap.file_read`, `cap.index_document`, `cap.ops_logging`
+  - caps: `cap.query_rows`, `cap.index_document`, `cap.ops_logging`
 
 ### Ideas
 - `create_idea` -> write idea file and index
@@ -115,6 +116,8 @@ Each skill should declare required/optional capabilities in its frontmatter.
   - caps: `cap.list_document_duplicates`, `cap.ops_logging`
 - `delete_duplicate_documents` -> delete duplicates
   - caps: `cap.delete_duplicate_documents`, `cap.ops_logging`
+- `delete_all_data` -> delete all DB rows (optionally delete content files)
+  - caps: `cap.delete_all_data`, `cap.ops_logging`
 - `resummarize_documents` -> update title/summary
   - caps: `cap.query_rows`, `cap.file_read`, `cap.llm_generate`, `cap.update_rows`, `cap.ops_logging`
 - `embeddings_build` -> build vector index

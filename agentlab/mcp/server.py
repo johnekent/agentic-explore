@@ -13,6 +13,7 @@ from agentlab.services.operations import (
     create_idea as svc_create_idea,
     create_skill as svc_create_skill,
     delete_duplicate_documents as svc_delete_duplicate_documents,
+    delete_all_data as svc_delete_all_data,
     demo_seed as svc_demo_seed,
     embeddings_status as svc_embeddings_status,
     fetch_and_index_urls as svc_fetch_and_index_urls,
@@ -446,6 +447,11 @@ def resummarize(only_missing: bool = True, limit: int | None = None, prefer_chun
 def cleanup_db(dry_run: bool = True) -> dict[str, Any]:
     ctx = OpsContext("agentlab-mcp", "mcp")
     return svc_cleanup_db(ctx, WS, dry_run=dry_run)
+
+@mcp.tool()
+def delete_all_data(delete_files: bool = True) -> dict[str, Any]:
+    ctx = OpsContext("agentlab-mcp", "mcp")
+    return svc_delete_all_data(ctx, WS, delete_files=delete_files)
 
 @mcp.tool()
 def demo_seed() -> dict[str, Any]:

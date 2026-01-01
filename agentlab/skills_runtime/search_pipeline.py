@@ -6,8 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from agentlab.core.frontmatter import dump_md_with_frontmatter
 from agentlab.core.paths import utc_now_iso
 from agentlab.pipeline.summarize import SYSTEM_SUMMARIZE
@@ -19,7 +17,7 @@ from agentlab.skills_runtime.ops_helpers import end_ops_run, start_ops_run, use_
 class SearchWebSources(Skill):
     spec = SkillSpec(
         name="search_web_sources",
-        required_capabilities=["cap.web_search", "cap.file_write", "cap.ops_logging"],
+        required_capabilities=["cap.web_search", "cap.persistence", "cap.ops_logging"],
     )
 
     def run(
@@ -62,19 +60,29 @@ class SearchWebSources(Skill):
                 "ended_at": "",
                 "outputs": {"candidates": [h.__dict__ for h in hits], "documents_created": []},
             }
-            run_path = Path(workspace) / "runs" / f"run_{search_run_id}" / "run.yaml"
             write_res = use_tool(
                 orch,
-                capability="cap.file_write",
+                capability="cap.persistence",
                 run_id=ops_run_id,
                 skill_name=self.spec.name,
-                parameters={"path": str(run_path)},
-                path=str(run_path),
-                content=yaml.safe_dump(run, sort_keys=False),
+                parameters={"table": "runs", "mode": "insert"},
+                table="runs",
+                rows=[
+                    {
+                        "run_id": run["run_id"],
+                        "topic": run["topic"],
+                        "started_at": run["started_at"],
+                        "ended_at": run["ended_at"],
+                        "params_json": json.dumps({"query": query, "top_n": top_n}),
+                        "outputs_json": json.dumps(run["outputs"]),
+                    }
+                ],
+                mode="insert",
+                db_path=str(Path(workspace) / "index" / "agent.db"),
             )
             if not write_res.ok:
                 raise RuntimeError(write_res.error)
-            return {"run_id": search_run_id, "run_path": str(run_path), "hits": hits}
+            return {"run_id": search_run_id, "hits": hits}
         except Exception:
             status = "error"
             raise
@@ -95,13 +103,13 @@ class FetchDocumentsFromRun(Skill):
     spec = SkillSpec(
         name="fetch_documents_from_run",
         required_capabilities=[
-            "cap.file_read",
             "cap.file_write",
             "cap.http_fetch",
             "cap.query_rows",
             "cap.llm_generate",
             "cap.env_check_db",
             "cap.env_check_llm",
+            "cap.update_rows",
             "cap.ops_logging",
         ],
     )
@@ -151,19 +159,23 @@ class FetchDocumentsFromRun(Skill):
                 raise RuntimeError(env_llm.error)
             if regenerate_summary and not env_llm.data.get("ready", False):
                 raise RuntimeError({"code": "llm_unavailable", "message": "LLM provider not available."})
-            run_path = Path(workspace) / "runs" / f"run_{run_id}" / "run.yaml"
             read_res = use_tool(
                 orch,
-                capability="cap.file_read",
+                capability="cap.query_rows",
                 run_id=ops_run_id,
                 skill_name=self.spec.name,
-                parameters={"path": str(run_path)},
-                path=str(run_path),
+                sql="SELECT run_id, topic, outputs_json FROM runs WHERE run_id = ? LIMIT 1",
+                params=[run_id],
+                db_path=str(Path(workspace) / "index" / "agent.db"),
             )
             if not read_res.ok:
-                raise ValueError("run.yaml not found for run_id")
-            run = yaml.safe_load(read_res.data.get("content") or "") or {}
-            candidates = run.get("outputs", {}).get("candidates", [])
+                raise RuntimeError(read_res.error)
+            rows = read_res.data.get("rows", [])
+            if not rows:
+                raise ValueError("run not found for run_id")
+            run_row = rows[0]
+            outputs = json.loads(run_row.get("outputs_json") or "{}")
+            candidates = outputs.get("candidates", [])
             for c in candidates:
                 url = c.get("url")
                 if not url:
@@ -236,7 +248,7 @@ class FetchDocumentsFromRun(Skill):
                     "summary": summary,
                     "tags": [],
                     "taxonomies": {"domain": [], "use_case": [], "risk": [], "maturity": []},
-                    "source": f"Web search query: {run.get('topic','')}\nResult title: {c.get('title','')}",
+                    "source": f"Web search query: {run_row.get('topic','')}\nResult title: {c.get('title','')}",
                     "review": {"score": None, "notes": ""},
                 }
                 content = dump_md_with_frontmatter(fm, f"# Content\n\n{text[:20000]}\n")
@@ -252,19 +264,18 @@ class FetchDocumentsFromRun(Skill):
                 if not write_res.ok:
                     raise RuntimeError(write_res.error)
                 created.append(str(doc_path))
-            run.setdefault("outputs", {})["documents_created"] = created
-            run["ended_at"] = utc_now_iso()
-            write_res = use_tool(
+            outputs["documents_created"] = created
+            update_res = use_tool(
                 orch,
-                capability="cap.file_write",
+                capability="cap.update_rows",
                 run_id=ops_run_id,
                 skill_name=self.spec.name,
-                parameters={"path": str(run_path)},
-                path=str(run_path),
-                content=yaml.safe_dump(run, sort_keys=False),
+                sql="UPDATE runs SET outputs_json = ?, ended_at = ? WHERE run_id = ?",
+                params=[json.dumps(outputs), utc_now_iso(), run_id],
+                db_path=str(Path(workspace) / "index" / "agent.db"),
             )
-            if not write_res.ok:
-                raise RuntimeError(write_res.error)
+            if not update_res.ok:
+                raise RuntimeError(update_res.error)
             return {"created_docs": created, "skipped": skipped}
         except Exception:
             status = "error"
@@ -276,7 +287,7 @@ class FetchDocumentsFromRun(Skill):
 class IndexDocumentsFromRun(Skill):
     spec = SkillSpec(
         name="index_documents_from_run",
-        required_capabilities=["cap.file_read", "cap.indexing", "cap.ops_logging"],
+        required_capabilities=["cap.query_rows", "cap.indexing", "cap.ops_logging"],
     )
 
     def run(
@@ -298,19 +309,22 @@ class IndexDocumentsFromRun(Skill):
         )
         status = "completed"
         try:
-            run_path = Path(workspace) / "runs" / f"run_{run_id}" / "run.yaml"
             read_res = use_tool(
                 orch,
-                capability="cap.file_read",
+                capability="cap.query_rows",
                 run_id=ops_run_id,
                 skill_name=self.spec.name,
-                parameters={"path": str(run_path)},
-                path=str(run_path),
+                sql="SELECT outputs_json FROM runs WHERE run_id = ? LIMIT 1",
+                params=[run_id],
+                db_path=str(Path(workspace) / "index" / "agent.db"),
             )
             if not read_res.ok:
-                raise ValueError("run.yaml not found for run_id")
-            run = yaml.safe_load(read_res.data.get("content") or "") or {}
-            doc_paths = run.get("outputs", {}).get("documents_created", [])
+                raise RuntimeError(read_res.error)
+            rows = read_res.data.get("rows", [])
+            if not rows:
+                raise ValueError("run not found for run_id")
+            outputs = json.loads(rows[0].get("outputs_json") or "{}")
+            doc_paths = outputs.get("documents_created", [])
             for p in doc_paths:
                 index_res = use_tool(
                     orch,

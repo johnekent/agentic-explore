@@ -82,6 +82,14 @@ agentlab plan assign <TASK_ID> "human_researcher"
 # Or use UI: streamlit run ui.py
 ```
 
+### 6) Maintenance (cleanup or full wipe)
+```bash
+agentlab cleanup-db --dry-run
+agentlab cleanup-db --apply
+agentlab delete-all-data --yes          # deletes DB rows + document/idea files
+agentlab delete-all-data --yes --keep-files
+```
+
 ## Optional: LLM provider
 ### Ollama (local)
 ```bash

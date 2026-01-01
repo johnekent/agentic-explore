@@ -11,6 +11,7 @@ from agentlab.skills_runtime.operations_skills import (
     BuildDashboard as BuildDashboardSkill,
     BuildEmbeddings as BuildEmbeddingsSkill,
     CleanupDb as CleanupDbSkill,
+    DeleteAllData as DeleteAllDataSkill,
     CreateIdea as CreateIdeaSkill,
     CreateSkill as CreateSkillSkill,
     DeleteDuplicateDocuments as DeleteDuplicateDocumentsSkill,
@@ -541,6 +542,19 @@ def cleanup_db(ctx: OpsContext, workspace: Path, dry_run: bool = True) -> dict[s
         orch,
         workspace=workspace,
         dry_run=dry_run,
+        agent_name=ctx.agent_name,
+        agent_type=ctx.agent_type,
+        parent_run_id=ctx.parent_run_id,
+    )
+
+
+def delete_all_data(ctx: OpsContext, workspace: Path, *, delete_files: bool = True) -> dict[str, Any]:
+    orch = default_orchestrator()
+    skill = DeleteAllDataSkill()
+    return skill.run(
+        orch,
+        workspace=workspace,
+        delete_files=delete_files,
         agent_name=ctx.agent_name,
         agent_type=ctx.agent_type,
         parent_run_id=ctx.parent_run_id,
