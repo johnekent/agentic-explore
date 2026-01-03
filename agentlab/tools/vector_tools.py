@@ -25,35 +25,52 @@ def vector_index(
     try:
         con = connect(Path(db_path))
         load_vec_extension(con)
-        ensure_vec_tables(con)
-        doc_count = 0
-        idea_count = 0
+        def rebuild():
+            con.execute("DROP TABLE IF EXISTS doc_embeddings")
+            con.execute("DROP TABLE IF EXISTS idea_embeddings")
+            ensure_vec_tables(con)
 
-        if include_docs:
-            docs = con.execute("SELECT id, title, summary, source_text FROM documents").fetchall()
-            for start in range(0, len(docs), batch_size):
-                chunk = docs[start:start + batch_size]
-                ids = [r["id"] for r in chunk]
-                texts = [
-                    "\n".join([str(r["title"] or ""), str(r["summary"] or ""), str(r["source_text"] or "")])
-                    for r in chunk
-                ]
-                vectors = batch_encode(texts, model_name=model_name)
-                upsert_embeddings(con, table="doc_embeddings", id_field="doc_id", ids=ids, vectors=vectors)
-                doc_count += len(ids)
+        def build() -> tuple[int, int]:
+            ensure_vec_tables(con)
+            doc_count = 0
+            idea_count = 0
 
-        if include_ideas:
-            ideas = con.execute("SELECT id, title, summary, source_text FROM ideas").fetchall()
-            for start in range(0, len(ideas), batch_size):
-                chunk = ideas[start:start + batch_size]
-                ids = [r["id"] for r in chunk]
-                texts = [
-                    "\n".join([str(r["title"] or ""), str(r["summary"] or ""), str(r["source_text"] or "")])
-                    for r in chunk
-                ]
-                vectors = batch_encode(texts, model_name=model_name)
-                upsert_embeddings(con, table="idea_embeddings", id_field="idea_id", ids=ids, vectors=vectors)
-                idea_count += len(ids)
+            if include_docs:
+                docs = con.execute("SELECT id, title, summary, source_text FROM documents").fetchall()
+                for start in range(0, len(docs), batch_size):
+                    chunk = docs[start:start + batch_size]
+                    ids = [r["id"] for r in chunk]
+                    texts = [
+                        "\n".join([str(r["title"] or ""), str(r["summary"] or ""), str(r["source_text"] or "")])
+                        for r in chunk
+                    ]
+                    vectors = batch_encode(texts, model_name=model_name)
+                    upsert_embeddings(con, table="doc_embeddings", id_field="doc_id", ids=ids, vectors=vectors)
+                    doc_count += len(ids)
+
+            if include_ideas:
+                ideas = con.execute("SELECT id, title, summary, source_text FROM ideas").fetchall()
+                for start in range(0, len(ideas), batch_size):
+                    chunk = ideas[start:start + batch_size]
+                    ids = [r["id"] for r in chunk]
+                    texts = [
+                        "\n".join([str(r["title"] or ""), str(r["summary"] or ""), str(r["source_text"] or "")])
+                        for r in chunk
+                    ]
+                    vectors = batch_encode(texts, model_name=model_name)
+                    upsert_embeddings(con, table="idea_embeddings", id_field="idea_id", ids=ids, vectors=vectors)
+                    idea_count += len(ids)
+
+            return doc_count, idea_count
+
+        try:
+            doc_count, idea_count = build()
+        except Exception as exc:
+            if "vector blob" in str(exc).lower():
+                rebuild()
+                doc_count, idea_count = build()
+            else:
+                raise
 
         con.commit()
         con.close()

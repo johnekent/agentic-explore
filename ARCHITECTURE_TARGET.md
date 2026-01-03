@@ -28,6 +28,9 @@ Notes:
 - `cap.index_document` -> `index_document` (legacy `cap.indexing` still exists)
 - `cap.index_idea` -> `index_idea`
 - `cap.db_migrate` -> `migrate_db`
+Notes:
+- `documents` include asset references (`asset_type`, `asset_ref`, `asset_path`) plus `content_path` to MD.
+- `item_processing` captures per-document action history (fetch, summary, index, embed).
 
 ### Matching, Planning, and Review
 - `cap.match_idea_to_docs` -> `match_idea_to_docs`
@@ -78,10 +81,10 @@ Each skill should declare required/optional capabilities in its frontmatter.
   - caps: `cap.web_search`, `cap.persist_rows`, `cap.ops_logging`
 - `fetch_documents_from_run` -> fetch URLs for a run
   - caps: `cap.file_write`, `cap.http_fetch`, `cap.query_rows`, `cap.update_rows`, `cap.llm_generate`, `cap.ops_logging`
-- `fetch_and_index_urls` -> fetch URLs then index documents
-  - caps: `cap.query_rows`, `cap.http_fetch`, `cap.file_write`, `cap.index_document`, `cap.llm_generate`, `cap.ops_logging`
+- `fetch_urls` -> fetch URLs and write documents
+  - caps: `cap.query_rows`, `cap.http_fetch`, `cap.file_write`, `cap.llm_generate`, `cap.ops_logging`
 - `index_documents_from_run` -> index fetched docs
-  - caps: `cap.query_rows`, `cap.index_document`, `cap.ops_logging`
+  - caps: `cap.query_rows`, `cap.indexing`, `cap.update_rows`, `cap.ops_logging`
 
 ### Ideas
 - `create_idea` -> write idea file and index

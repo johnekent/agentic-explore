@@ -67,8 +67,8 @@ Open: `workspace/exports/dashboard.md`
 ### 4) Run a real web search + fetch
 ```bash
 agentlab search "asset tokenization market infrastructure" --top-n 8
-agentlab fetch --run-id <RUN_ID_FROM_SEARCH_OUTPUT>
-agentlab index docs --run-id <RUN_ID>
+agentlab fetch <RUN_ID_FROM_SEARCH_OUTPUT>
+agentlab index docs <RUN_ID>
 agentlab match ideas
 agentlab dashboard build
 ```
@@ -101,6 +101,8 @@ export OLLAMA_MODEL=llama3.1
 ```bash
 docker run -d --name ollama -p 11434:11434 ollama/ollama
 docker exec -it ollama ollama pull llama3.1
+docker exec -it ollama ollama pull phi3:mini  # depending on what model(s) are used
+docker exec -it ollama ollama run phi3:mini "Summarize: This is a short test."
 ```
 Windows note: Docker Desktop must be running for these commands to work.
 

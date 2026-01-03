@@ -198,3 +198,48 @@ def log_interaction(
     )
     con.commit()
     con.close()
+
+
+def log_span(
+    run_id: str,
+    span_name: str,
+    *,
+    skill_name: str | None = None,
+    category: str | None = None,
+    status: str = "ok",
+    duration_ms: int,
+    started_at: str,
+    ended_at: str,
+    metadata: dict[str, Any] | None = None,
+    parent_span_id: str | None = None,
+    db_path: Path | None = None,
+) -> None:
+    if db_path is None:
+        ws = ensure_workspace(Path("workspace"))
+        db_path = ws.db_path
+    con = connect(db_path)
+    apply_migrations_from_dir(con, Path("db/migrations"))
+    span_id = str(uuid.uuid4())
+    with_retry(
+        lambda: con.execute(
+        """
+        INSERT INTO perf_spans (id, run_id, span_name, span_category, skill_name, status, started_at, ended_at, duration_ms, metadata_json, parent_span_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            span_id,
+            run_id,
+            span_name,
+            category,
+            skill_name,
+            status,
+            started_at,
+            ended_at,
+            duration_ms,
+            json.dumps(metadata) if metadata else None,
+            parent_span_id,
+        ),
+        )
+    )
+    con.commit()
+    con.close()

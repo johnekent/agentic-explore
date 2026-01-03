@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict
 
 from agentlab.capabilities.registry import load_capabilities
-from agentlab.tools.cleanup_tools import cleanup_db, delete_all_data
+from agentlab.tools.cleanup_tools import cleanup_content, cleanup_db, delete_all_data
 from agentlab.tools.dedup_tools import delete_duplicate_documents, list_document_duplicates
 from agentlab.tools.env_tools import env_check_db, env_check_llm
 from agentlab.tools.file_tools import list_files, read_file, write_file
@@ -61,6 +61,7 @@ def build_registry() -> ToolRegistry:
         "judge_validity": judge_validity_tool,
         "build_dashboard": build_dashboard_tool,
         "cleanup_db": cleanup_db,
+        "cleanup_content": cleanup_content,
         "delete_all_data": delete_all_data,
         "list_document_duplicates": list_document_duplicates,
         "delete_duplicate_documents": delete_duplicate_documents,

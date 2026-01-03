@@ -1,3 +1,4 @@
+import json
 import streamlit as st
 import pandas as pd
 from pathlib import Path
@@ -8,7 +9,9 @@ from agentlab.services.operations import (
     create_idea,
     create_skill,
     embeddings_status,
-    fetch_and_index_urls,
+    fetch_run,
+    fetch_urls,
+    index_documents,
     list_runs,
     list_skills,
     list_document_duplicates,
@@ -103,12 +106,149 @@ def build_lineage_text(
         lines.extend(build_lineage_text(child["id"], runs_by_id, runs_by_parent, tool_calls_by_run, interactions_by_run, depth + 1))
     return lines
 
-st.title("Agent Lab UI")
+def _safe_count(sql: str, params: list[object] | None = None) -> int | None:
+    try:
+        rows = query_rows(ctx, sql, params or [], workspace=ws)
+        if not rows:
+            return 0
+        return int(rows[0].get("c") or 0)
+    except Exception:
+        return None
 
-tabs = st.tabs(["Search", "Fetch & Index", "Match & Dashboard", "Planning", "Skills", "Duplicates", "Ops", "DB Viewer", "Add Idea"])
+
+def get_pipeline_status() -> dict[str, int | None]:
+    runs = 0
+    run_hits = 0
+    try:
+        rows = query_rows(ctx, "SELECT outputs_json FROM runs", [], workspace=ws)
+        runs = len(rows)
+        for row in rows:
+            outputs = json.loads(row.get("outputs_json") or "{}")
+            candidates = outputs.get("candidates") or []
+            summary = outputs.get("summary") or {}
+            run_hits += len(candidates)
+    except Exception:
+        runs = None
+        run_hits = None
+    fetch_success = _safe_count(
+        """
+        SELECT COUNT(DISTINCT item_id) AS c
+        FROM item_processing
+        WHERE item_type = 'document'
+          AND stage = 'fetch'
+          AND status = 'success'
+        """
+    )
+    index_success = _safe_count(
+        """
+        SELECT COUNT(DISTINCT item_id) AS c
+        FROM item_processing
+        WHERE item_type = 'document'
+          AND stage = 'index'
+          AND status = 'success'
+        """
+    )
+    fetch_failed = _safe_count(
+        """
+        SELECT COUNT(DISTINCT item_id) AS c
+        FROM item_processing
+        WHERE item_type = 'document'
+          AND stage = 'fetch'
+          AND status IN ('failed', 'error')
+        """
+    )
+    index_failed = _safe_count(
+        """
+        SELECT COUNT(DISTINCT item_id) AS c
+        FROM item_processing
+        WHERE item_type = 'document'
+          AND stage = 'index'
+          AND status IN ('failed', 'error')
+        """
+    )
+    pending_index = _safe_count(
+        """
+        SELECT COUNT(DISTINCT f.item_id) AS c
+        FROM item_processing f
+        LEFT JOIN item_processing i
+          ON f.item_id = i.item_id
+          AND i.stage = 'index'
+          AND i.status = 'success'
+        WHERE f.item_type = 'document'
+          AND f.stage = 'fetch'
+          AND f.status = 'success'
+          AND i.item_id IS NULL
+        """
+    )
+    try:
+        embed_status = embeddings_status(ctx, ws)
+        doc_embeddings = embed_status.get("documents")
+        idea_embeddings = embed_status.get("ideas")
+    except Exception:
+        doc_embeddings = None
+        idea_embeddings = None
+    return {
+        "runs": runs,
+        "run_hits": run_hits,
+        "fetch_success": fetch_success,
+        "index_success": index_success,
+        "pending_index": pending_index,
+        "fetch_failed": fetch_failed,
+        "index_failed": index_failed,
+        "documents": _safe_count("SELECT COUNT(*) AS c FROM documents"),
+        "ideas": _safe_count("SELECT COUNT(*) AS c FROM ideas"),
+        "matches": _safe_count("SELECT COUNT(*) AS c FROM matches"),
+        "doc_embeddings": doc_embeddings,
+        "idea_embeddings": idea_embeddings,
+    }
+
+st.title("Agent Lab UI")
+st.markdown(
+    "**Workflow:** 1) Source information  2) Identify work  3) Prioritize work  4) Track execution  5) Monitor ops"
+)
+pipeline = get_pipeline_status()
+
+st.sidebar.header("Pipeline Status")
+docs_total = pipeline.get("documents")
+ideas_total = pipeline.get("ideas")
+matches_total = pipeline.get("matches")
+doc_embeds = pipeline.get("doc_embeddings")
+idea_embeds = pipeline.get("idea_embeddings")
+if st.sidebar.button("Refresh status"):
+    st.rerun()
+st.sidebar.caption("Flow: search -> fetch -> index -> local search -> matching")
+st.sidebar.metric("Web search runs", pipeline.get("runs") if pipeline.get("runs") is not None else "unknown")
+st.sidebar.metric("Search hits (all runs)", pipeline.get("run_hits") if pipeline.get("run_hits") is not None else "unknown")
+st.sidebar.metric("Fetched (success)", pipeline.get("fetch_success") if pipeline.get("fetch_success") is not None else "unknown")
+st.sidebar.metric("Indexed (success)", pipeline.get("index_success") if pipeline.get("index_success") is not None else "unknown")
+st.sidebar.metric("Pending index", pipeline.get("pending_index") if pipeline.get("pending_index") is not None else "unknown")
+st.sidebar.metric("Fetch failed", pipeline.get("fetch_failed") if pipeline.get("fetch_failed") is not None else "unknown")
+st.sidebar.metric("Index failed", pipeline.get("index_failed") if pipeline.get("index_failed") is not None else "unknown")
+st.sidebar.metric("Indexed documents", docs_total if docs_total is not None else "unknown")
+st.sidebar.metric("Ideas", ideas_total if ideas_total is not None else "unknown")
+st.sidebar.metric("Matches", matches_total if matches_total is not None else "unknown")
+if docs_total is not None and doc_embeds is not None:
+    st.sidebar.write(f"Local search enabled (docs): {doc_embeds}/{docs_total}")
+    st.sidebar.progress(0 if docs_total == 0 else min(1.0, doc_embeds / max(docs_total, 1)))
+else:
+    st.sidebar.write("Local search enabled (docs): unknown")
+if ideas_total is not None and idea_embeds is not None:
+    st.sidebar.write(f"Local search enabled (ideas): {idea_embeds}/{ideas_total}")
+    st.sidebar.progress(0 if ideas_total == 0 else min(1.0, idea_embeds / max(ideas_total, 1)))
+else:
+    st.sidebar.write("Local search enabled (ideas): unknown")
+st.sidebar.caption("Dependencies: fetch creates docs; index enables search/matching.")
+
+tabs = st.tabs([
+    "1 Source",
+    "2 Identify",
+    "3 Prioritize",
+    "4 Track",
+    "Monitor",
+])
 
 with tabs[0]:
-    st.header("Search")
+    st.header("Source Information")
     st.subheader("Web Search")
     query = st.text_input("Query", key="web_query")
     top_n = st.slider("Top N", 1, 20, 10, key="web_top_n")
@@ -125,68 +265,7 @@ with tabs[0]:
         df = pd.DataFrame([h.__dict__ for h in st.session_state["search_results"]])
         st.dataframe(df)
 
-    st.subheader("Local Search")
-    search_mode = st.radio("Mode", ["Semantic (default)", "Keyword"], horizontal=True, key="local_mode")
-    search_query = st.text_input("Search", key="local_query")
-    search_limit = st.slider("Max Results Per Type", 5, 50, 20, key="local_limit")
-    model_name = st.text_input("Embedding Model", "sentence-transformers/all-MiniLM-L6-v2", key="local_model")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Search Local"):
-            if search_query:
-                try:
-                    if search_mode.startswith("Semantic"):
-                        result = search_semantic(ctx, search_query, ws, limit=search_limit, model_name=model_name)
-                    else:
-                        result = search_local(ctx, search_query, ws, limit=search_limit)
-                    st.session_state["local_search_results"] = result
-                except Exception as exc:
-                    st.error(f"Search failed: {exc}")
-            else:
-                st.error("Enter a search query")
-    with col2:
-        if st.button("Build Embeddings"):
-            try:
-                status = st.status("Building embeddings...", expanded=True)
-                log_fn, logs = make_status_logger(status)
-                result = build_embeddings(ctx, ws, model_name=model_name, log_fn=log_fn)
-                status.update(label="Embeddings complete.", state="complete")
-                st.session_state["semantic_embed_logs"] = logs
-                st.success(f"Embedded docs={result['documents']} ideas={result['ideas']}")
-            except Exception as exc:
-                status.update(label="Embeddings failed.", state="error")
-                st.error(f"Embedding build failed: {exc}")
-        if st.button("Check Embedding Status"):
-            try:
-                status = embeddings_status(ctx, ws)
-                st.session_state["semantic_embed_status"] = status
-            except Exception as exc:
-                st.error(f"Status check failed: {exc}")
-
-    if "semantic_embed_status" in st.session_state:
-        st.info(f"Embeddings docs={st.session_state['semantic_embed_status']['documents']} ideas={st.session_state['semantic_embed_status']['ideas']}")
-    if "semantic_embed_logs" in st.session_state:
-        st.subheader("Embedding Build Logs")
-        st.text("\n".join(st.session_state["semantic_embed_logs"]))
-
-    if "local_search_results" in st.session_state:
-        res = st.session_state["local_search_results"]
-        st.subheader("Documents")
-        docs = res.get("documents", [])
-        if docs:
-            st.dataframe(pd.DataFrame(docs))
-        else:
-            st.info("No document matches.")
-        st.subheader("Ideas")
-        ideas = res.get("ideas", [])
-        if ideas:
-            st.dataframe(pd.DataFrame(ideas))
-        else:
-            st.info("No idea matches.")
-
-with tabs[1]:
-    st.header("Fetch & Index Documents")
+    st.header("Fetch Documents")
     try:
         runs = list_runs(ctx, ws, limit=25)
         if runs:
@@ -208,6 +287,7 @@ with tabs[1]:
                     selected_run_id = rid
                     break
             if selected_run_id:
+                st.session_state["selected_run_id"] = selected_run_id
                 st.session_state["loaded_run"] = load_run(ctx, ws, selected_run_id)
         else:
             st.info("No runs found.")
@@ -219,8 +299,21 @@ with tabs[1]:
         if 'search_results' in st.session_state:
             urls.extend([h.url for h in st.session_state['search_results']])
         if "loaded_run" in st.session_state:
-            urls.extend([c.get("url") for c in st.session_state["loaded_run"].get("outputs", {}).get("candidates", [])])
+            run_outputs = st.session_state["loaded_run"].get("outputs", {}) or {}
+            candidates = run_outputs.get("candidates", [])
+            created = run_outputs.get("documents_created", [])
+            summary = run_outputs.get("summary") or {}
+            urls.extend([c.get("url") for c in candidates])
+            st.subheader("Selected Run Summary")
+            st.write(f"Search hits: {summary.get('hits', len(candidates))}")
+            st.write(f"Fetched documents from run: {summary.get('fetched', len(created))}")
+            st.write(f"Indexed documents from run: {summary.get('indexed', 0)}")
+            st.write(f"Skipped (duplicates): {summary.get('skipped', 0)}")
+            st.write(f"Failed to fetch: {summary.get('failed', 0)}")
+            if candidates:
+                st.caption("Fetch and index are separate steps.")
         urls = [u for u in urls if u]
+        urls = list(dict.fromkeys(urls))
         select_all = st.checkbox("Select all URLs", key="select_all_urls")
         if select_all:
             st.session_state["fetch_urls_selected"] = urls
@@ -231,36 +324,126 @@ with tabs[1]:
         )
         regenerate = st.checkbox("Regenerate title/summary (LLM)", key="fetch_regen")
         chunking = st.checkbox("Prefer chunked summarization", value=True, key="fetch_chunking")
-        if st.button("Fetch & Index"):
-            status = st.status("Fetching and indexing...", expanded=True)
-            log_fn, _ = make_status_logger(status)
-            result = fetch_and_index_urls(
-                ctx,
-                selected,
-                ws,
-                regenerate_summary=regenerate,
-                prefer_chunking=chunking,
-                log_fn=log_fn,
-            )
-            status.update(label="Fetch/index complete.", state="complete")
-            if result["fetched"] > 0:
-                st.success(f"Fetched and indexed {result['fetched']} documents")
-            if result["failed_urls"]:
-                st.warning("Failed to fetch some URLs:")
-                for fail in result["failed_urls"]:
-                    st.write(fail)
+        fetch_col, index_col = st.columns(2)
+        with fetch_col:
+            if st.button("Fetch"):
+                status = st.status("Fetching...", expanded=True)
+                log_fn, _ = make_status_logger(status)
+                result = fetch_urls(
+                    ctx,
+                    selected,
+                    ws,
+                    regenerate_summary=regenerate,
+                    prefer_chunking=chunking,
+                    log_fn=log_fn,
+                )
+                status.update(label="Fetch complete.", state="complete")
+                st.session_state["last_fetch_created"] = result.get("created_docs", [])
+                if result["fetched"] > 0:
+                    st.success(f"Fetched {result['fetched']} documents")
+                if result["failed_urls"]:
+                    st.warning("Failed to fetch some URLs:")
+                    for fail in result["failed_urls"]:
+                        st.write(fail)
+        with index_col:
+            can_index = bool(st.session_state.get("last_fetch_created"))
+            if st.button("Index fetched docs", disabled=not can_index):
+                status = st.status("Indexing fetched docs...", expanded=True)
+                result = index_documents(ctx, st.session_state["last_fetch_created"], ws)
+                status.update(label="Index complete.", state="complete")
+                st.success(f"Indexed {result['indexed']} documents")
+                if result.get("failed"):
+                    st.warning(f"Failed to index {result['failed']} documents")
     else:
         st.info("Search first")
 
-with tabs[2]:
-    st.header("Match Ideas & Build Dashboard")
-    if st.button("Match Ideas to Docs"):
+    st.header("Add Idea")
+    title = st.text_input("Title")
+    statement = st.text_area("Statement")
+    if st.button("Add"):
+        if title and statement:
+            result = create_idea(ctx, title, statement, "ui", ws)
+            st.write(f"Idea file created at: {result['path']}")
+            st.success("Added")
+            st.rerun()  # Refresh to update cache
+        else:
+            st.error("Fill fields")
+
+with tabs[1]:
+    st.header("Identify Possible Work")
+    st.subheader("Local Search")
+    search_mode = st.radio("Mode", ["Semantic (default)", "Keyword"], horizontal=True, key="local_mode")
+    search_query = st.text_input("Search", key="local_query")
+    search_limit = st.slider("Max Results Per Type", 5, 50, 20, key="local_limit")
+    model_name = st.text_input("Embedding Model", "sentence-transformers/all-MiniLM-L6-v2", key="local_model")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Search Local"):
+            if search_query:
+                try:
+                    if search_mode.startswith("Semantic"):
+                        result = search_semantic(ctx, search_query, ws, limit=search_limit, model_name=model_name)
+                    else:
+                        result = search_local(ctx, search_query, ws, limit=search_limit)
+                    st.session_state["local_search_results"] = result
+                except Exception as exc:
+                    st.error(f"Search failed: {exc}")
+            else:
+                st.error("Enter a search query")
+    with col2:
+        can_embed = (docs_total or 0) > 0 or (ideas_total or 0) > 0
+        if st.button("Enable Local Search", disabled=not can_embed):
+            try:
+                status = st.status("Building local search index...", expanded=True)
+                log_fn, logs = make_status_logger(status)
+                result = build_embeddings(ctx, ws, model_name=model_name, log_fn=log_fn)
+                status.update(label="Local search ready.", state="complete")
+                st.session_state["semantic_embed_logs"] = logs
+                st.success(f"Indexed docs={result['documents']} ideas={result['ideas']}")
+                st.rerun()
+            except Exception as exc:
+                status.update(label="Local search indexing failed.", state="error")
+                st.error(f"Local search indexing failed: {exc}")
+        if not can_embed:
+            st.caption("Local search requires at least one indexed document or idea.")
+        if st.button("Check Embedding Status"):
+            try:
+                status = embeddings_status(ctx, ws)
+                st.session_state["semantic_embed_status"] = status
+            except Exception as exc:
+                st.error(f"Status check failed: {exc}")
+
+    if "semantic_embed_status" in st.session_state:
+        st.info(f"Local search indexed docs={st.session_state['semantic_embed_status']['documents']} ideas={st.session_state['semantic_embed_status']['ideas']}")
+    if "semantic_embed_logs" in st.session_state:
+        st.subheader("Local Search Index Logs")
+        st.text("\n".join(st.session_state["semantic_embed_logs"]))
+
+    if "local_search_results" in st.session_state:
+        res = st.session_state["local_search_results"]
+        st.subheader("Documents")
+        docs = res.get("documents", [])
+        if docs:
+            st.dataframe(pd.DataFrame(docs))
+        else:
+            st.info("No document matches.")
+        st.subheader("Ideas")
+        ideas = res.get("ideas", [])
+        if ideas:
+            st.dataframe(pd.DataFrame(ideas))
+        else:
+            st.info("No idea matches.")
+    can_match = (docs_total or 0) > 0 and (ideas_total or 0) > 0
+    if st.button("Match Ideas to Docs", disabled=not can_match):
         status = st.status("Matching ideas...", expanded=True)
         log_fn, _ = make_status_logger(status)
         count = match_all_ideas(ctx, ws, top_n=10, log_fn=log_fn)
         status.update(label="Matching complete.", state="complete")
         st.success(f"Matched {count} ideas")
         st.rerun()  # Refresh to update cache
+    if not can_match:
+        st.caption("Matching requires at least one document and one idea.")
 
     if st.button("Build Dashboard"):
         out = build_dashboard(ctx, ws)
@@ -299,21 +482,9 @@ with tabs[2]:
         st.subheader("Re-summarize Logs")
         st.text("\n".join(st.session_state["resum_logs"]))
 
-with tabs[3]:
-    st.header("Planning & Task Management")
+with tabs[2]:
+    st.header("Prioritize Work")
 
-    # View Backlog
-    st.subheader("Task Backlog")
-    if st.button("Refresh Backlog"):
-        st.rerun()
-    tasks = plan_backlog(ctx, ws)
-    if tasks:
-        task_df = pd.DataFrame(tasks)
-        st.dataframe(task_df)
-    else:
-        st.info("No active tasks.")
-
-    # Create Task from Match
     st.subheader("Create Task from Match")
     matches_df = load_table("matches")
     if not matches_df.empty:
@@ -326,8 +497,8 @@ with tabs[3]:
     else:
         st.info("No matches available.")
 
-    # Update Task
     st.subheader("Update Task")
+    tasks = plan_backlog(ctx, ws)
     if tasks:
         task_ids = [t['id'] for t in tasks]
         selected_task = st.selectbox("Select Task to Update", task_ids, key="update")
@@ -342,14 +513,27 @@ with tabs[3]:
             plan_assign(ctx, selected_task, agent, ws)
             st.success(f"Assigned {agent} to task {selected_task}")
             st.rerun()
+    else:
+        st.info("No active tasks.")
 
-    # Gantt Chart
+with tabs[3]:
+    st.header("Track Execution")
+    st.subheader("Task Backlog")
+    if st.button("Refresh Backlog"):
+        st.rerun()
+    tasks = plan_backlog(ctx, ws)
+    if tasks:
+        task_df = pd.DataFrame(tasks)
+        st.dataframe(task_df)
+    else:
+        st.info("No active tasks.")
+
     st.subheader("Gantt Chart")
     if st.button("Generate Gantt Chart"):
         tasks = plan_backlog(ctx, ws)
         if tasks:
             import gantt
-            from datetime import datetime, timedelta, date
+            from datetime import datetime, date
             p = gantt.Project(name='Agent Lab Tasks')
             for t in tasks:
                 start = datetime.fromisoformat(t['created_at']).date()
@@ -366,45 +550,38 @@ with tabs[3]:
             st.info("No tasks to display.")
 
 with tabs[4]:
-    st.header("Skills")
-    try:
-        skills = list_skills(ctx, Path("skills"))
-        if skills:
-            st.subheader("Installed Skills")
-            st.dataframe(pd.DataFrame(skills))
-        else:
-            st.info("No skills found.")
-    except Exception as exc:
-        st.error(f"Skill listing failed: {exc}")
-
-    st.subheader("Create Skill")
-    skill_name = st.text_input("Skill Name (lowercase, hyphens)")
-    skill_desc = st.text_area("Description (used for triggering)")
-    skill_body = st.text_area("SKILL.md Body", height=200, value="# Instructions\n")
-    if st.button("Create Skill"):
+    st.header("Monitor")
+    st.subheader("Environment Validation")
+    require_llm = st.checkbox("Require LLM (Ollama)", value=True, key="env_require_llm")
+    auto_start = st.checkbox("Auto-start Ollama if stopped", value=True, key="env_auto_start")
+    min_free_mb = st.number_input("Min free disk (MB)", min_value=10, max_value=10240, value=50, step=10, key="env_min_free")
+    if st.button("Validate Environment"):
+        status = st.status("Validating environment...", expanded=True)
+        status.write("Checking workspace DB and disk space.")
+        status.write("Checking LLM provider and attempting auto-start if needed.")
         try:
-            skill_path = create_skill(ctx, skill_name, skill_desc, skill_body, Path("skills"))
-            st.success(f"Created {skill_path}")
+            result = validate_environment(
+                ctx,
+                workspace=ws,
+                require_llm=require_llm,
+                auto_start=auto_start,
+                min_free_mb=min_free_mb,
+            )
+            status.update(label="Environment checks passed.", state="complete")
+            st.json(result)
         except Exception as exc:
-            st.error(f"Skill creation failed: {exc}")
+            status.update(label="Environment validation failed.", state="error")
+            st.error(f"Environment validation failed: {exc}")
 
-    st.subheader("View Skill.md")
-    if skills:
-        selected_skill = st.selectbox("Select Skill", [s["path"] for s in skills], key="skill_view_select")
-        if selected_skill:
-            try:
-                content = read_file(ctx, selected_skill)
-                st.code(content, language="markdown")
-            except Exception as exc:
-                st.error(f"Failed to load SKILL.md: {exc}")
-
-with tabs[5]:
-    st.header("Duplicate Documents")
-    if st.button("Check for Duplicates"):
+    st.subheader("Duplicate Documents")
+    can_dedup = (docs_total or 0) > 0
+    if st.button("Check for Duplicates", disabled=not can_dedup):
         try:
             st.session_state["duplicate_groups"] = list_document_duplicates(ctx, ws)
         except Exception as exc:
             st.error(f"Duplicate check failed: {exc}")
+    if not can_dedup:
+        st.caption("Duplicate checks require indexed documents.")
 
     groups = st.session_state.get("duplicate_groups", [])
     if groups:
@@ -446,30 +623,6 @@ with tabs[5]:
                 st.info("Select at least one document ID.")
     else:
         st.info("No duplicates loaded.")
-
-with tabs[6]:
-    st.header("Ops Dashboard")
-    st.subheader("Environment Validation")
-    require_llm = st.checkbox("Require LLM (Ollama)", value=True, key="env_require_llm")
-    auto_start = st.checkbox("Auto-start Ollama if stopped", value=True, key="env_auto_start")
-    min_free_mb = st.number_input("Min free disk (MB)", min_value=10, max_value=10240, value=50, step=10, key="env_min_free")
-    if st.button("Validate Environment"):
-        status = st.status("Validating environment...", expanded=True)
-        status.write("Checking workspace DB and disk space.")
-        status.write("Checking LLM provider and attempting auto-start if needed.")
-        try:
-            result = validate_environment(
-                ctx,
-                workspace=ws,
-                require_llm=require_llm,
-                auto_start=auto_start,
-                min_free_mb=min_free_mb,
-            )
-            status.update(label="Environment checks passed.", state="complete")
-            st.json(result)
-        except Exception as exc:
-            status.update(label="Environment validation failed.", state="error")
-            st.error(f"Environment validation failed: {exc}")
     runs_df = load_table("agent_runs")
     calls_df = load_table("tool_calls")
     interactions_df = load_table("agent_interactions")
@@ -488,6 +641,45 @@ with tabs[6]:
         st.dataframe(interactions_df)
     else:
         st.info("No interactions logged yet.")
+
+    st.subheader("Performance Report")
+    perf_df = load_table("perf_spans")
+    if perf_df.empty:
+        st.info("No performance spans logged yet.")
+    else:
+        perf_df["duration_ms"] = pd.to_numeric(perf_df.get("duration_ms"), errors="coerce").fillna(0).astype(int)
+        run_ids = sorted(perf_df.get("run_id", pd.Series(dtype=str)).dropna().unique().tolist())
+        run_filter = st.selectbox("Filter by run", ["(all)"] + run_ids, key="perf_run_filter")
+        if run_filter != "(all)":
+            perf_df = perf_df[perf_df["run_id"] == run_filter]
+        grouped = (
+            perf_df.groupby(["span_name", "skill_name", "span_category", "status"])["duration_ms"]
+            .agg(
+                count="count",
+                avg_ms="mean",
+                p95_ms=lambda s: s.quantile(0.95),
+                max_ms="max",
+            )
+            .reset_index()
+            .sort_values(by="p95_ms", ascending=False)
+        )
+        st.dataframe(grouped.head(50))
+        st.caption("Durations are in milliseconds; p95 is per span group.")
+        slowest = perf_df.sort_values(by="duration_ms", ascending=False).head(50)
+        st.subheader("Slowest spans")
+        st.dataframe(
+            slowest[
+                [
+                    "span_name",
+                    "skill_name",
+                    "span_category",
+                    "duration_ms",
+                    "run_id",
+                    "status",
+                    "started_at",
+                ]
+            ]
+        )
 
     st.subheader("Lineage")
     if runs_df.empty:
@@ -512,21 +704,54 @@ with tabs[6]:
             lines = build_lineage_text(root_id, runs_by_id, runs_by_parent, tool_calls_by_run, interactions_by_run)
             st.code("\n".join(lines) if lines else "(no lineage)")
 
-with tabs[7]:
-    st.header("DB Viewer")
-    table = st.selectbox("Table", ["runs", "documents", "ideas", "matches", "tasks", "usage_logs", "agent_runs", "tool_calls", "agent_interactions"])
+    st.subheader("Skills")
+    try:
+        skills = list_skills(ctx, Path("skills"))
+        if skills:
+            st.subheader("Installed Skills")
+            st.dataframe(pd.DataFrame(skills))
+        else:
+            st.info("No skills found.")
+    except Exception as exc:
+        st.error(f"Skill listing failed: {exc}")
+
+    st.subheader("Create Skill")
+    skill_name = st.text_input("Skill Name (lowercase, hyphens)")
+    skill_desc = st.text_area("Description (used for triggering)")
+    skill_body = st.text_area("SKILL.md Body", height=200, value="# Instructions\n")
+    if st.button("Create Skill"):
+        try:
+            skill_path = create_skill(ctx, skill_name, skill_desc, skill_body, Path("skills"))
+            st.success(f"Created {skill_path}")
+        except Exception as exc:
+            st.error(f"Skill creation failed: {exc}")
+
+    st.subheader("View Skill.md")
+    if skills:
+        selected_skill = st.selectbox("Select Skill", [s["path"] for s in skills], key="skill_view_select")
+        if selected_skill:
+            try:
+                content = read_file(ctx, selected_skill)
+                st.code(content, language="markdown")
+            except Exception as exc:
+                st.error(f"Failed to load SKILL.md: {exc}")
+
+    st.subheader("DB Viewer")
+    table = st.selectbox(
+        "Table",
+        [
+            "runs",
+            "documents",
+            "item_processing",
+            "ideas",
+            "matches",
+            "tasks",
+            "usage_logs",
+            "agent_runs",
+            "tool_calls",
+            "agent_interactions",
+            "perf_spans",
+        ],
+    )
     df = load_table(table)
     st.dataframe(df)
-
-with tabs[8]:
-    st.header("Add Idea")
-    title = st.text_input("Title")
-    statement = st.text_area("Statement")
-    if st.button("Add"):
-        if title and statement:
-            result = create_idea(ctx, title, statement, "ui", ws)
-            st.write(f"Idea file created at: {result['path']}")
-            st.success("Added")
-            st.rerun()  # Refresh to update cache
-        else:
-            st.error("Fill fields")

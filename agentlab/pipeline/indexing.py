@@ -11,16 +11,21 @@ def upsert_document(db_path: Path, doc_path: Path) -> str:
     tax = fm.get("taxonomies") if isinstance(fm.get("taxonomies"), dict) else {}
     review = fm.get("review") if isinstance(fm.get("review"), dict) else {}
     con.execute(
-        """INSERT INTO documents(id,title,url,retrieved_at,summary,content_path,source_text,run_id,review_score,review_notes)
-           VALUES (?,?,?,?,?,?,?,?,?,?)
+        """INSERT INTO documents(
+             id,title,url,retrieved_at,summary,content_path,source_text,run_id,review_score,review_notes,
+             asset_type,asset_ref,asset_path
+           )
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(id) DO UPDATE SET
              title=excluded.title,url=excluded.url,retrieved_at=excluded.retrieved_at,summary=excluded.summary,
              content_path=excluded.content_path,source_text=excluded.source_text,run_id=excluded.run_id,
+             asset_type=excluded.asset_type,asset_ref=excluded.asset_ref,asset_path=excluded.asset_path,
              review_score=coalesce(excluded.review_score, documents.review_score),
              review_notes=coalesce(excluded.review_notes, documents.review_notes)
         """,
         (doc_id, fm.get("title"), fm.get("url"), fm.get("retrieved_at"), fm.get("summary"),
-         str(doc_path), fm.get("source") or "", fm.get("run_id"), review.get("score"), review.get("notes"))
+         str(doc_path), fm.get("source") or "", fm.get("run_id"), review.get("score"), review.get("notes"),
+         fm.get("asset_type"), fm.get("asset_ref"), fm.get("asset_path"))
     )
     con.execute("DELETE FROM document_taxonomy WHERE document_id=?", (doc_id,))
     for tax_name, labels in (tax or {}).items():

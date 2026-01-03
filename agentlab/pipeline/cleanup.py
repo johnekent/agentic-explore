@@ -119,3 +119,65 @@ def delete_all_data_records(ws_root: Path, *, delete_files: bool = True) -> dict
     report["total_tables"] = len(tables)
     report["total_rows"] = sum(report["tables"].values())
     return report
+
+
+def cleanup_unreferenced_content(ws_root: Path, *, dry_run: bool = True) -> dict[str, Any]:
+    """
+    Remove content files that are no longer referenced in the database.
+    """
+    ws = ensure_workspace(ws_root)
+    con = connect(ws.db_path)
+    doc_paths = [r["content_path"] for r in con.execute("SELECT content_path FROM documents").fetchall()]
+    idea_paths = [r["content_path"] for r in con.execute("SELECT content_path FROM ideas").fetchall()]
+    con.close()
+
+    referenced: set[Path] = set()
+    for path_str in doc_paths + idea_paths:
+        if not path_str:
+            continue
+        p = Path(path_str)
+        if not p.is_absolute():
+            p = ws_root / p
+        referenced.add(p.resolve())
+
+    def scan_kind(kind: str, names: set[str]) -> list[Path]:
+        root = ws_root / "content" / kind
+        if not root.exists():
+            return []
+        candidates = []
+        for path in root.rglob("*.md"):
+            if path.name in names:
+                candidates.append(path)
+        return candidates
+
+    candidates = scan_kind("documents", {"doc.md"}) + scan_kind("ideas", {"idea.md"})
+    unreferenced = [p for p in candidates if p.resolve() not in referenced]
+
+    deleted = 0
+    for path in unreferenced:
+        if dry_run:
+            continue
+        try:
+            path.unlink()
+            deleted += 1
+        except Exception:
+            continue
+        # Remove empty parent directories up to content root.
+        for stop in [ws_root / "content" / "documents", ws_root / "content" / "ideas"]:
+            if stop in path.parents:
+                parent = path.parent
+                while parent != stop:
+                    try:
+                        next(parent.iterdir())
+                        break
+                    except StopIteration:
+                        parent.rmdir()
+                        parent = parent.parent
+                break
+
+    return {
+        "dry_run": dry_run,
+        "candidates": len(candidates),
+        "unreferenced": len(unreferenced),
+        "deleted": deleted,
+    }

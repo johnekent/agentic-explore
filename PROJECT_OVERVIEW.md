@@ -73,6 +73,8 @@ This is intentionally **not** an autonomous system. Humans remain the final judg
 - **SQLite** = searchable index and relational glue
 - SQLite enforces **foreign key integrity**
 - Search runs are stored in SQLite (`runs` table) for UI/CLI selection
+- Documents store asset references (`asset_type`, `asset_ref`, `asset_path`) plus MD content path.
+- `item_processing` logs per-document action stages (fetch, summary, index, embed) for status reporting.
 
 ### Matching
 - Bidirectional:

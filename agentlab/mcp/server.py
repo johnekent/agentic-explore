@@ -9,6 +9,7 @@ from agentlab.services.operations import (
     OpsContext,
     build_embeddings as svc_build_embeddings,
     build_dashboard as svc_build_dashboard,
+    cleanup_content as svc_cleanup_content,
     cleanup_db as svc_cleanup_db,
     create_idea as svc_create_idea,
     create_skill as svc_create_skill,
@@ -16,8 +17,9 @@ from agentlab.services.operations import (
     delete_all_data as svc_delete_all_data,
     demo_seed as svc_demo_seed,
     embeddings_status as svc_embeddings_status,
-    fetch_and_index_urls as svc_fetch_and_index_urls,
     fetch_run as svc_fetch_run,
+    fetch_urls as svc_fetch_urls,
+    fetch_and_index_urls as svc_fetch_and_index_urls,
     index_docs as svc_index_docs,
     init_db as svc_init_db,
     judge_validity_report as svc_judge_validity_report,
@@ -237,6 +239,13 @@ def ops_log(
     with_agent: str | None = None,
     interaction_type: str | None = None,
     details: dict[str, Any] | None = None,
+    span_name: str | None = None,
+    span_category: str | None = None,
+    span_status: str | None = None,
+    started_at: str | None = None,
+    ended_at: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    parent_span_id: str | None = None,
 ) -> dict[str, Any]:
     return _tool_result(
         tool_ops_log(
@@ -255,6 +264,13 @@ def ops_log(
             with_agent=with_agent,
             interaction_type=interaction_type,
             details=details,
+            span_name=span_name,
+            span_category=span_category,
+            span_status=span_status,
+            started_at=started_at,
+            ended_at=ended_at,
+            metadata=metadata,
+            parent_span_id=parent_span_id,
         )
     )
 
@@ -359,6 +375,17 @@ def fetch_run(run_id: str, regenerate_summary: bool = False) -> dict[str, Any]:
     return svc_fetch_run(ctx, run_id, WS, regenerate_summary=regenerate_summary)
 
 @mcp.tool()
+def fetch_urls(urls: list[str], regenerate_summary: bool = False, prefer_chunking: bool = True) -> dict[str, Any]:
+    ctx = OpsContext("agentlab-mcp", "mcp")
+    return svc_fetch_urls(
+        ctx,
+        urls,
+        WS,
+        regenerate_summary=regenerate_summary,
+        prefer_chunking=prefer_chunking,
+    )
+
+@mcp.tool()
 def fetch_and_index(urls: list[str], regenerate_summary: bool = False, prefer_chunking: bool = True) -> dict[str, Any]:
     ctx = OpsContext("agentlab-mcp", "mcp")
     return svc_fetch_and_index_urls(
@@ -447,6 +474,11 @@ def resummarize(only_missing: bool = True, limit: int | None = None, prefer_chun
 def cleanup_db(dry_run: bool = True) -> dict[str, Any]:
     ctx = OpsContext("agentlab-mcp", "mcp")
     return svc_cleanup_db(ctx, WS, dry_run=dry_run)
+
+@mcp.tool()
+def cleanup_content(dry_run: bool = True) -> dict[str, Any]:
+    ctx = OpsContext("agentlab-mcp", "mcp")
+    return svc_cleanup_content(ctx, WS, dry_run=dry_run)
 
 @mcp.tool()
 def delete_all_data(delete_files: bool = True) -> dict[str, Any]:

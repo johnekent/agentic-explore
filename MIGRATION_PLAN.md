@@ -21,7 +21,7 @@ If memory is lost: read `ARCHITECTURE_TARGET.md` first, then execute the Next St
 - `build_embeddings` -> skill `embeddings_build` -> tool `vector_index` (new)
 - `search_semantic` -> skill `search_semantic` -> tool `vector_query` (new)
 - `embeddings_status` -> skill `embeddings_status` -> tool `vector_stats` (new)
-- `fetch_and_index_urls` -> skill `fetch_and_index_urls` -> tools `fetch_url`, `write_file`, `index_document`, optional `llm_generate`
+- `fetch_urls` -> skill `fetch_urls` -> tools `fetch_url`, `write_file`, optional `llm_generate`
 - `resummarize_documents` -> skill `resummarize_documents` -> tools `read_file`, `llm_generate`, `update_rows`
 - `index_docs` -> skill `index_documents_from_run` -> tool `index_document`
 - `create_idea` -> skill `create_idea` -> tools `write_file`, `index_idea`
@@ -75,3 +75,4 @@ Add these to `capabilities.yaml`, with tools in `agentlab/tools/*`:
 - Status logging: long-running skills now emit `agent_interactions` entries via ops logging, and UI/CLI can attach live log callbacks for progress visibility.
 - Summarization fallback: adaptive chunking based on `OLLAMA_TIMEOUT_S` to reduce timeouts (map-reduce style).
 - Runs now persist in SQLite (`runs` table). `workspace/runs` is deprecated for new data.
+- Document actions now record per-document stages in `item_processing` (fetch, summary, index, embed).

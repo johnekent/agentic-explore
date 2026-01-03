@@ -86,9 +86,20 @@ def migrate_db(workspace: str, migrations_dir: str) -> ToolResult:
     try:
         ws = ensure_workspace(Path(workspace))
         con = connect(ws.db_path)
-        apply_migrations_from_dir(con, Path(migrations_dir))
+        migrations_path = Path(migrations_dir)
+        if not migrations_path.exists():
+            repo_root = Path(__file__).resolve().parents[2]
+            fallback = repo_root / "db" / "migrations"
+            if fallback.exists():
+                migrations_path = fallback
+        if not migrations_path.exists():
+            return ToolResult.failure(
+                "migrations_missing",
+                f"migrations_dir not found: {migrations_dir}",
+            )
+        apply_migrations_from_dir(con, migrations_path)
         con.close()
-        return ToolResult.success({"db_path": str(ws.db_path)})
+        return ToolResult.success({"db_path": str(ws.db_path), "migrations_dir": str(migrations_path)})
     except sqlite3.Error as exc:
         return ToolResult.failure("sqlite_error", str(exc))
     except Exception as exc:

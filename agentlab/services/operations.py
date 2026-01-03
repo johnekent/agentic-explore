@@ -5,11 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agentlab.db.db import apply_migrations_from_dir, connect
 from agentlab.orchestrator.runtime import default_orchestrator
 from agentlab.pipeline.embeddings import DEFAULT_EMBED_MODEL
 from agentlab.skills_runtime.operations_skills import (
     BuildDashboard as BuildDashboardSkill,
     BuildEmbeddings as BuildEmbeddingsSkill,
+    CleanupContent as CleanupContentSkill,
     CleanupDb as CleanupDbSkill,
     DeleteAllData as DeleteAllDataSkill,
     CreateIdea as CreateIdeaSkill,
@@ -17,7 +19,8 @@ from agentlab.skills_runtime.operations_skills import (
     DeleteDuplicateDocuments as DeleteDuplicateDocumentsSkill,
     DemoSeed as DemoSeedSkill,
     EmbeddingsStatus as EmbeddingsStatusSkill,
-    FetchAndIndexUrls as FetchAndIndexUrlsSkill,
+    FetchUrls as FetchUrlsSkill,
+    IndexDocuments as IndexDocumentsSkill,
     InitWorkspace as InitWorkspaceSkill,
     JudgeValidity as JudgeValiditySkill,
     ListDocumentDuplicates as ListDocumentDuplicatesSkill,
@@ -57,17 +60,32 @@ class OpsContext:
 
 
 def init_db(ctx: OpsContext, workspace: Path, migrations_dir: Path) -> Path:
+    migrations_path = migrations_dir
+    if not migrations_path.exists():
+        repo_root = Path(__file__).resolve().parents[2]
+        fallback = repo_root / "db" / "migrations"
+        if fallback.exists():
+            migrations_path = fallback
     orch = default_orchestrator()
     skill = InitWorkspaceSkill()
     result = skill.run(
         orch,
         workspace=workspace,
-        migrations_dir=migrations_dir,
+        migrations_dir=migrations_path,
         agent_name=ctx.agent_name,
         agent_type=ctx.agent_type,
         parent_run_id=ctx.parent_run_id,
     )
-    return Path(result.get("db_path") or workspace / "index" / "agent.db")
+    db_path = Path(result.get("db_path") or workspace / "index" / "agent.db")
+    if migrations_path.exists():
+        con = connect(db_path)
+        row = con.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'perf_spans'"
+        ).fetchone()
+        if row is None:
+            apply_migrations_from_dir(con, migrations_path)
+        con.close()
+    return db_path
 
 
 def list_runs(ctx: OpsContext, workspace: Path, limit: int = 50) -> list[dict[str, Any]]:
@@ -312,7 +330,13 @@ def search_web(ctx: OpsContext, query: str, workspace: Path, top_n: int = 10) ->
     )
 
 
-def fetch_run(ctx: OpsContext, run_id: str, workspace: Path, *, regenerate_summary: bool = False) -> dict[str, Any]:
+def fetch_run(
+    ctx: OpsContext,
+    run_id: str,
+    workspace: Path,
+    *,
+    regenerate_summary: bool = False,
+) -> dict[str, Any]:
     orch = default_orchestrator()
     skill = FetchDocumentsFromRun()
     return skill.run(
@@ -326,7 +350,7 @@ def fetch_run(ctx: OpsContext, run_id: str, workspace: Path, *, regenerate_summa
     )
 
 
-def fetch_and_index_urls(
+def fetch_urls(
     ctx: OpsContext,
     urls: list[str],
     workspace: Path,
@@ -336,7 +360,7 @@ def fetch_and_index_urls(
     log_fn=None,
 ) -> dict[str, Any]:
     orch = default_orchestrator()
-    skill = FetchAndIndexUrlsSkill()
+    skill = FetchUrlsSkill()
     return skill.run(
         orch,
         urls=urls,
@@ -348,6 +372,32 @@ def fetch_and_index_urls(
         agent_type=ctx.agent_type,
         parent_run_id=ctx.parent_run_id,
     )
+
+
+def fetch_and_index_urls(
+    ctx: OpsContext,
+    urls: list[str],
+    workspace: Path,
+    *,
+    regenerate_summary: bool = False,
+    prefer_chunking: bool = True,
+    log_fn=None,
+) -> dict[str, Any]:
+    fetch_result = fetch_urls(
+        ctx,
+        urls,
+        workspace,
+        regenerate_summary=regenerate_summary,
+        prefer_chunking=prefer_chunking,
+        log_fn=log_fn,
+    )
+    created = fetch_result.get("created_docs", [])
+    index_result = index_documents(ctx, created, workspace)
+    return {
+        **fetch_result,
+        "indexed": index_result.get("indexed", 0),
+        "index_failed": index_result.get("failed", 0),
+    }
 
 
 def resummarize_documents(
@@ -380,6 +430,19 @@ def index_docs(ctx: OpsContext, run_id: str, workspace: Path) -> int:
     return skill.run(
         orch,
         run_id=run_id,
+        workspace=workspace,
+        agent_name=ctx.agent_name,
+        agent_type=ctx.agent_type,
+        parent_run_id=ctx.parent_run_id,
+    )
+
+
+def index_documents(ctx: OpsContext, doc_paths: list[str], workspace: Path) -> dict[str, int]:
+    orch = default_orchestrator()
+    skill = IndexDocumentsSkill()
+    return skill.run(
+        orch,
+        doc_paths=doc_paths,
         workspace=workspace,
         agent_name=ctx.agent_name,
         agent_type=ctx.agent_type,
@@ -538,6 +601,19 @@ def plan_assign(ctx: OpsContext, task_id: str, agent: str, workspace: Path) -> N
 def cleanup_db(ctx: OpsContext, workspace: Path, dry_run: bool = True) -> dict[str, Any]:
     orch = default_orchestrator()
     skill = CleanupDbSkill()
+    return skill.run(
+        orch,
+        workspace=workspace,
+        dry_run=dry_run,
+        agent_name=ctx.agent_name,
+        agent_type=ctx.agent_type,
+        parent_run_id=ctx.parent_run_id,
+    )
+
+
+def cleanup_content(ctx: OpsContext, workspace: Path, dry_run: bool = True) -> dict[str, Any]:
+    orch = default_orchestrator()
+    skill = CleanupContentSkill()
     return skill.run(
         orch,
         workspace=workspace,

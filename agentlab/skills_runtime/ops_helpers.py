@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 import time
+import uuid
 from typing import Any
 
+from agentlab.core.paths import utc_now_iso
 from agentlab.orchestrator.runtime import Orchestrator
 from agentlab.tools.types import ToolResult
 
@@ -99,6 +102,45 @@ def use_tool(
     return result
 
 
+def log_item_processing(
+    orch: Orchestrator,
+    *,
+    run_id: str,
+    skill_name: str,
+    item_type: str,
+    item_id: str,
+    stage: str,
+    status: str,
+    db_path: str,
+    error: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    payload = {
+        "id": str(uuid.uuid4()),
+        "item_type": item_type,
+        "item_id": item_id,
+        "run_id": run_id,
+        "stage": stage,
+        "status": status,
+        "error": error,
+        "metadata_json": json.dumps(metadata) if metadata else None,
+        "started_at": utc_now_iso(),
+        "ended_at": utc_now_iso(),
+    }
+    res = use_tool(
+        orch,
+        capability="cap.persistence",
+        run_id=run_id,
+        skill_name=skill_name,
+        parameters={"table": "item_processing", "stage": stage, "status": status},
+        table="item_processing",
+        rows=[payload],
+        mode="insert",
+        db_path=db_path,
+    )
+    _require_ok(res, "item_processing")
+
+
 def emit_status(
     orch: Orchestrator,
     *,
@@ -122,3 +164,70 @@ def emit_status(
     )
     if log_fn:
         log_fn(message)
+
+
+class PerfSpan:
+    def __init__(
+        self,
+        orch: Orchestrator,
+        *,
+        run_id: str,
+        skill_name: str,
+        span_name: str,
+        category: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        parent_span_id: str | None = None,
+    ) -> None:
+        self._orch = orch
+        self._run_id = run_id
+        self._skill_name = skill_name
+        self._span_name = span_name
+        self._category = category
+        self._metadata = metadata
+        self._parent_span_id = parent_span_id
+        self._started_at = ""
+        self._start = 0.0
+
+    def __enter__(self) -> "PerfSpan":
+        self._started_at = utc_now_iso()
+        self._start = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        duration_ms = int((time.perf_counter() - self._start) * 1000)
+        status = "error" if exc_type else "ok"
+        self._orch.use(
+            "cap.ops_logging",
+            action="span",
+            run_id=self._run_id,
+            span_name=self._span_name,
+            skill_name=self._skill_name,
+            span_category=self._category,
+            span_status=status,
+            duration_ms=duration_ms,
+            started_at=self._started_at,
+            ended_at=utc_now_iso(),
+            metadata=self._metadata,
+            parent_span_id=self._parent_span_id,
+        )
+
+
+def perf_span(
+    orch: Orchestrator,
+    *,
+    run_id: str,
+    skill_name: str,
+    span_name: str,
+    category: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    parent_span_id: str | None = None,
+) -> PerfSpan:
+    return PerfSpan(
+        orch,
+        run_id=run_id,
+        skill_name=skill_name,
+        span_name=span_name,
+        category=category,
+        metadata=metadata,
+        parent_span_id=parent_span_id,
+    )

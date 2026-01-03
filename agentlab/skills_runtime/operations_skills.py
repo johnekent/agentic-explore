@@ -14,7 +14,7 @@ from agentlab.core.paths import utc_now_iso
 from agentlab.pipeline.summarize import SYSTEM_SUMMARIZE
 from agentlab.pipeline.web import extract_readable_text
 from agentlab.skills_runtime.base import Skill, SkillSpec
-from agentlab.skills_runtime.ops_helpers import emit_status, end_ops_run, start_ops_run, use_tool
+from agentlab.skills_runtime.ops_helpers import emit_status, end_ops_run, log_item_processing, perf_span, start_ops_run, use_tool
 from agentlab.skills_runtime.summarize_helpers import summarize_with_fallback
 
 
@@ -517,7 +517,7 @@ class SearchLocal(Skill):
 class BuildEmbeddings(Skill):
     spec = SkillSpec(
         name="embeddings_build",
-        required_capabilities=["cap.vector_index", "cap.env_check_db", "cap.ops_logging"],
+        required_capabilities=["cap.vector_index", "cap.query_rows", "cap.persistence", "cap.env_check_db", "cap.ops_logging"],
     )
 
     def run(
@@ -562,25 +562,61 @@ class BuildEmbeddings(Skill):
                 agent_type=agent_type,
                 parent_run_id=ops_run_id,
             )
-            res = use_tool(
+            with perf_span(
                 orch,
-                capability="cap.vector_index",
                 run_id=ops_run_id,
                 skill_name=self.spec.name,
-                parameters={
+                span_name="vector_index",
+                category="embedding",
+                metadata={
                     "model_name": model_name,
                     "batch_size": batch_size,
                     "include_docs": include_docs,
                     "include_ideas": include_ideas,
                 },
-                db_path=_db_path(workspace),
-                model_name=model_name,
-                batch_size=batch_size,
-                include_docs=include_docs,
-                include_ideas=include_ideas,
-            )
+            ):
+                res = use_tool(
+                    orch,
+                    capability="cap.vector_index",
+                    run_id=ops_run_id,
+                    skill_name=self.spec.name,
+                    parameters={
+                        "model_name": model_name,
+                        "batch_size": batch_size,
+                        "include_docs": include_docs,
+                        "include_ideas": include_ideas,
+                    },
+                    db_path=_db_path(workspace),
+                    model_name=model_name,
+                    batch_size=batch_size,
+                    include_docs=include_docs,
+                    include_ideas=include_ideas,
+                )
             if not res.ok:
                 raise RuntimeError(res.error)
+            if include_docs:
+                rows_res = use_tool(
+                    orch,
+                    capability="cap.query_rows",
+                    run_id=ops_run_id,
+                    skill_name=self.spec.name,
+                    sql="SELECT id FROM documents",
+                    params=[],
+                    db_path=_db_path(workspace),
+                )
+                if not rows_res.ok:
+                    raise RuntimeError(rows_res.error)
+                for row in rows_res.data.get("rows", []):
+                    log_item_processing(
+                        orch,
+                        run_id=ops_run_id,
+                        skill_name=self.spec.name,
+                        item_type="document", item_id=str(row.get("id") or ""),
+                        stage="embed",
+                        status="success",
+                        db_path=_db_path(workspace),
+                        metadata={"model": model_name},
+                    )
             emit_status(
                 orch,
                 run_id=ops_run_id,
@@ -721,14 +757,13 @@ class SearchSemantic(Skill):
         finally:
             end_ops_run(orch, run_id=ops_run_id, status=status)
 
-class FetchAndIndexUrls(Skill):
+class FetchUrls(Skill):
     spec = SkillSpec(
-        name="fetch_and_index_urls",
+        name="fetch_urls",
         required_capabilities=[
             "cap.query_rows",
             "cap.http_fetch",
             "cap.file_write",
-            "cap.index_document",
             "cap.llm_generate",
             "cap.env_check_db",
             "cap.env_check_llm",
@@ -760,12 +795,13 @@ class FetchAndIndexUrls(Skill):
         fetched = 0
         skipped = 0
         failed: list[str] = []
+        created: list[str] = []
         try:
             emit_status(
                 orch,
                 run_id=ops_run_id,
                 skill_name=self.spec.name,
-                message=f"Fetch/index start urls={len(urls)}",
+                message=f"Fetch start urls={len(urls)}",
                 stage="start",
                 log_fn=log_fn,
             )
@@ -788,99 +824,160 @@ class FetchAndIndexUrls(Skill):
                     stage="fetch",
                     log_fn=log_fn,
                 )
-                dup_res = use_tool(
+                span_meta = {"url": url}
+                with perf_span(
                     orch,
-                    capability="cap.query_rows",
                     run_id=ops_run_id,
                     skill_name=self.spec.name,
-                    parameters={"url": url},
-                    sql="SELECT id FROM documents WHERE url = ? LIMIT 1",
-                    params=[url],
-                    db_path=_db_path(workspace),
-                )
-                if not dup_res.ok:
-                    raise RuntimeError(dup_res.error)
-                if dup_res.data.get("rows"):
-                    skipped += 1
-                    continue
-                fetch_res = use_tool(
-                    orch,
-                    capability="cap.http_fetch",
-                    run_id=ops_run_id,
-                    skill_name=self.spec.name,
-                    parameters={"url": url},
-                    url=url,
-                    timeout_s=30,
-                    headers={"User-Agent": "Mozilla/5.0"},
-                )
-                if not fetch_res.ok:
-                    failed.append(f"{url}: {fetch_res.error}")
-                    continue
-                text = extract_readable_text(fetch_res.data.get("text") or "")
-                doc_id = str(uuid.uuid4())
-                title = ""
-                summary = ""
-                if regenerate_summary or not (title and summary):
-                    prompt = text[:6000]
-                    prompt = f"URL: {url}\n\nCONTENT:\n{prompt}"
-                    llm_out = summarize_with_fallback(
+                    span_name="fetch_document",
+                    category="item",
+                    metadata=span_meta,
+                ):
+                    dup_res = use_tool(
+                        orch,
+                        capability="cap.query_rows",
+                        run_id=ops_run_id,
+                        skill_name=self.spec.name,
+                        parameters={"url": url},
+                        sql="SELECT id FROM documents WHERE url = ? LIMIT 1",
+                        params=[url],
+                        db_path=_db_path(workspace),
+                    )
+                    if not dup_res.ok:
+                        raise RuntimeError(dup_res.error)
+                    if dup_res.data.get("rows"):
+                        doc_id = str(dup_res.data["rows"][0].get("id"))
+                        span_meta["doc_id"] = doc_id
+                        log_item_processing(
+                            orch,
+                            run_id=ops_run_id,
+                            skill_name=self.spec.name,
+                            item_type="document", item_id=doc_id,
+                            stage="fetch",
+                            status="skipped_duplicate",
+                            db_path=_db_path(workspace),
+                            metadata={"url": url},
+                        )
+                        skipped += 1
+                        continue
+                    fetch_res = use_tool(
+                        orch,
+                        capability="cap.http_fetch",
+                        run_id=ops_run_id,
+                        skill_name=self.spec.name,
+                        parameters={"url": url},
+                        url=url,
+                        timeout_s=30,
+                        headers={"User-Agent": "Mozilla/5.0"},
+                    )
+                    if not fetch_res.ok:
+                        failed.append(f"{url}: {fetch_res.error}")
+                        log_item_processing(
+                            orch,
+                            run_id=ops_run_id,
+                            skill_name=self.spec.name,
+                            item_type="document",
+                            item_id=str(uuid.uuid4()),
+                            stage="fetch",
+                            status="failed",
+                            db_path=_db_path(workspace),
+                            error=str(fetch_res.error),
+                            metadata={"url": url},
+                        )
+                        continue
+                    text = extract_readable_text(fetch_res.data.get("text") or "")
+                    doc_id = str(uuid.uuid4())
+                    span_meta["doc_id"] = doc_id
+                    title = ""
+                    summary = ""
+                    summary_attempted = False
+                    if regenerate_summary or not (title and summary):
+                        summary_attempted = True
+                        prompt = text[:6000]
+                        prompt = f"URL: {url}\n\nCONTENT:\n{prompt}"
+                        llm_out = summarize_with_fallback(
+                            orch,
+                            run_id=ops_run_id,
+                            skill_name=self.spec.name,
+                            system=SYSTEM_SUMMARIZE,
+                            prompt=prompt,
+                            text=text,
+                            doc_id=doc_id,
+                            prefer_chunking=prefer_chunking,
+                            log_fn=log_fn,
+                        )
+                        title = llm_out.get("title") or title
+                        summary = llm_out.get("summary") or summary
+                    doc_path = _dated_content_path(workspace, "documents", doc_id, "doc.md")
+                    fm = {
+                        "id": doc_id,
+                        "type": "document",
+                        "title": title,
+                        "url": url,
+                        "retrieved_at": utc_now_iso(),
+                        "run_id": None,
+                        "summary": summary,
+                        "asset_type": "url",
+                        "asset_ref": url,
+                        "asset_path": None,
+                        "tags": [],
+                        "taxonomies": {"domain": [], "use_case": [], "risk": [], "maturity": []},
+                        "source": f"UI fetch: {url}",
+                        "review": {"score": None, "notes": ""},
+                    }
+                    content = dump_md_with_frontmatter(fm, f"# Content\n\n{text[:20000]}\n")
+                    write_res = use_tool(
+                        orch,
+                        capability="cap.file_write",
+                        run_id=ops_run_id,
+                        skill_name=self.spec.name,
+                        parameters={"path": str(doc_path)},
+                        path=str(doc_path),
+                        content=content,
+                    )
+                    if not write_res.ok:
+                        failed.append(f"{url}: {write_res.error}")
+                        log_item_processing(
+                            orch,
+                            run_id=ops_run_id,
+                            skill_name=self.spec.name,
+                            item_type="document",
+                            item_id=doc_id,
+                            stage="fetch",
+                            status="failed",
+                            db_path=_db_path(workspace),
+                            error=str(write_res.error),
+                            metadata={"url": url, "path": str(doc_path)},
+                        )
+                        continue
+                    log_item_processing(
                         orch,
                         run_id=ops_run_id,
                         skill_name=self.spec.name,
-                        system=SYSTEM_SUMMARIZE,
-                        prompt=prompt,
-                        text=text,
-                        doc_id=doc_id,
-                        prefer_chunking=prefer_chunking,
-                        log_fn=log_fn,
+                        item_type="document", item_id=doc_id,
+                        stage="fetch",
+                        status="success",
+                        db_path=_db_path(workspace),
+                        metadata={"url": url, "path": str(doc_path)},
                     )
-                    title = llm_out.get("title") or title
-                    summary = llm_out.get("summary") or summary
-                doc_path = _dated_content_path(workspace, "documents", doc_id, "doc.md")
-                fm = {
-                    "id": doc_id,
-                    "type": "document",
-                    "title": title,
-                    "url": url,
-                    "retrieved_at": utc_now_iso(),
-                    "run_id": None,
-                    "summary": summary,
-                    "tags": [],
-                    "taxonomies": {"domain": [], "use_case": [], "risk": [], "maturity": []},
-                    "source": f"UI fetch: {url}",
-                    "review": {"score": None, "notes": ""},
-                }
-                content = dump_md_with_frontmatter(fm, f"# Content\n\n{text[:20000]}\n")
-                write_res = use_tool(
-                    orch,
-                    capability="cap.file_write",
-                    run_id=ops_run_id,
-                    skill_name=self.spec.name,
-                    parameters={"path": str(doc_path)},
-                    path=str(doc_path),
-                    content=content,
-                )
-                if not write_res.ok:
-                    failed.append(f"{url}: {write_res.error}")
-                    continue
-                index_res = use_tool(
-                    orch,
-                    capability="cap.index_document",
-                    run_id=ops_run_id,
-                    skill_name=self.spec.name,
-                    parameters={"path": str(doc_path)},
-                    doc_path=str(doc_path),
-                )
-                if not index_res.ok:
-                    failed.append(f"{url}: {index_res.error}")
-                    continue
-                fetched += 1
+                    if summary_attempted:
+                        log_item_processing(
+                            orch,
+                            run_id=ops_run_id,
+                            skill_name=self.spec.name,
+                            item_type="document", item_id=doc_id,
+                            stage="summary",
+                            status="success",
+                            db_path=_db_path(workspace),
+                        )
+                    created.append(str(doc_path))
+                    fetched += 1
                 if fetched % 5 == 0:
                     emit_status(
                         orch,
                         run_id=ops_run_id,
                         skill_name=self.spec.name,
-                        message=f"Fetch/index progress fetched={fetched} skipped={skipped} failed={len(failed)}",
+                        message=f"Fetch progress fetched={fetched} skipped={skipped} failed={len(failed)}",
                         stage="progress",
                         log_fn=log_fn,
                     )
@@ -890,11 +987,91 @@ class FetchAndIndexUrls(Skill):
                 orch,
                 run_id=ops_run_id,
                 skill_name=self.spec.name,
-                message=f"Fetch/index complete fetched={fetched} skipped={skipped} failed={len(failed)}",
+                message=f"Fetch complete fetched={fetched} skipped={skipped} failed={len(failed)}",
                 stage="complete",
                 log_fn=log_fn,
             )
-            return {"fetched": fetched, "failed_urls": failed, "skipped": skipped}
+            return {"fetched": fetched, "failed_urls": failed, "skipped": skipped, "created_docs": created}
+        except Exception:
+            status = "error"
+            raise
+        finally:
+            end_ops_run(orch, run_id=ops_run_id, status=status)
+
+
+class IndexDocuments(Skill):
+    spec = SkillSpec(
+        name="index_documents",
+        required_capabilities=["cap.index_document", "cap.ops_logging"],
+    )
+
+    def run(
+        self,
+        orch,
+        *,
+        doc_paths: list[str],
+        workspace: Path,
+        agent_name: str,
+        agent_type: str,
+        parent_run_id: str | None = None,
+    ) -> dict[str, int]:
+        ops_run_id = start_ops_run(
+            orch,
+            agent_name=agent_name,
+            agent_type=agent_type,
+            purpose="index-documents",
+            parent_run_id=parent_run_id,
+        )
+        status = "completed"
+        indexed = 0
+        failed = 0
+
+        def _doc_id_from_path(path: Path) -> str | None:
+            try:
+                fm, _ = parse_md_with_frontmatter(path.read_text(encoding="utf-8"))
+                return str(fm.get("id") or "").strip() or None
+            except Exception:
+                return None
+
+        try:
+            for path_str in doc_paths:
+                path = Path(path_str)
+                fallback_id = _doc_id_from_path(path) or str(uuid.uuid4())
+                res = use_tool(
+                    orch,
+                    capability="cap.index_document",
+                    run_id=ops_run_id,
+                    skill_name=self.spec.name,
+                    parameters={"path": str(path)},
+                    doc_path=str(path),
+                )
+                if res.ok:
+                    indexed += 1
+                    doc_id = str(res.data.get("id") or fallback_id)
+                    log_item_processing(
+                        orch,
+                        run_id=ops_run_id,
+                        skill_name=self.spec.name,
+                        item_type="document", item_id=doc_id,
+                        stage="index",
+                        status="success",
+                        db_path=_db_path(workspace),
+                        metadata={"path": str(path)},
+                    )
+                else:
+                    failed += 1
+                    log_item_processing(
+                        orch,
+                        run_id=ops_run_id,
+                        skill_name=self.spec.name,
+                        item_type="document", item_id=fallback_id,
+                        stage="index",
+                        status="failed",
+                        db_path=_db_path(workspace),
+                        error=str(res.error),
+                        metadata={"path": str(path)},
+                    )
+            return {"indexed": indexed, "failed": failed}
         except Exception:
             status = "error"
             raise
@@ -910,6 +1087,7 @@ class ResummarizeDocuments(Skill):
             "cap.file_read",
             "cap.llm_generate",
             "cap.update_rows",
+            "cap.persistence",
             "cap.env_check_db",
             "cap.env_check_llm",
             "cap.ops_logging",
@@ -1026,10 +1204,29 @@ class ResummarizeDocuments(Skill):
                         if not upd_res.ok:
                             raise RuntimeError(upd_res.error)
                         updated += 1
+                    log_item_processing(
+                        orch,
+                        run_id=ops_run_id,
+                        skill_name=self.spec.name,
+                        item_type="document", item_id=str(r.get("id") or ""),
+                        stage="summary",
+                        status="success",
+                        db_path=_db_path(workspace),
+                    )
                 except Exception as exc:
                     errors += 1
                     if log_fn:
                         log_fn(f"[resum] error id={r.get('id')} err={exc}")
+                    log_item_processing(
+                        orch,
+                        run_id=ops_run_id,
+                        skill_name=self.spec.name,
+                        item_type="document", item_id=str(r.get("id") or ""),
+                        stage="summary",
+                        status="failed",
+                        db_path=_db_path(workspace),
+                        error=str(exc),
+                    )
                 if processed % 10 == 0 and processed > 0:
                     emit_status(
                         orch,
@@ -1254,7 +1451,7 @@ class MatchAllDocs(Skill):
                     run_id=ops_run_id,
                     skill_name=self.spec.name,
                     parameters={"document_id": did, "top_n": top_n},
-                    document_id=did,
+                    item_id=did,
                     top_n=top_n,
                     db_path=_db_path(workspace),
                 )
@@ -1357,7 +1554,7 @@ class MatchSingleDoc(Skill):
                 run_id=ops_run_id,
                 skill_name=self.spec.name,
                 parameters={"document_id": document_id, "top_n": top_n},
-                document_id=document_id,
+                item_id=document_id,
                 top_n=top_n,
                 db_path=_db_path(workspace),
             )
@@ -1650,6 +1847,47 @@ class CleanupDb(Skill):
             res = use_tool(
                 orch,
                 capability="cap.cleanup_db",
+                run_id=ops_run_id,
+                skill_name=self.spec.name,
+                parameters={"dry_run": dry_run},
+                workspace=str(workspace),
+                dry_run=dry_run,
+            )
+            if not res.ok:
+                raise RuntimeError(res.error)
+            return res.data or {}
+        except Exception:
+            status = "error"
+            raise
+        finally:
+            end_ops_run(orch, run_id=ops_run_id, status=status)
+
+
+class CleanupContent(Skill):
+    spec = SkillSpec(name="cleanup_content", required_capabilities=["cap.cleanup_content", "cap.ops_logging"])
+
+    def run(
+        self,
+        orch,
+        *,
+        workspace: Path,
+        dry_run: bool,
+        agent_name: str,
+        agent_type: str,
+        parent_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        ops_run_id = start_ops_run(
+            orch,
+            agent_name=agent_name,
+            agent_type=agent_type,
+            purpose="cleanup-content",
+            parent_run_id=parent_run_id,
+        )
+        status = "completed"
+        try:
+            res = use_tool(
+                orch,
+                capability="cap.cleanup_content",
                 run_id=ops_run_id,
                 skill_name=self.spec.name,
                 parameters={"dry_run": dry_run},

@@ -74,6 +74,9 @@ capabilities:
   - id: cap.cleanup_db
     description: Clean up stale database references.
     default_tool: cleanup_db
+  - id: cap.cleanup_content
+    description: Remove unreferenced content files from the workspace.
+    default_tool: cleanup_content
   - id: cap.delete_all_data
     description: Delete all rows from the SQLite database.
     default_tool: delete_all_data

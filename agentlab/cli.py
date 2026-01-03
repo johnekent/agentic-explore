@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import sqlite3
 from pathlib import Path
 import typer
 from agentlab.core.paths import ensure_workspace
@@ -8,6 +9,7 @@ from agentlab.services.operations import (
     build_dashboard,
     build_embeddings as svc_build_embeddings,
     cleanup_db as svc_cleanup_db,
+    cleanup_content as svc_cleanup_content,
     create_idea as svc_create_idea,
     delete_all_data as svc_delete_all_data,
     demo_seed as svc_demo_seed,
@@ -39,8 +41,22 @@ MIGRATIONS_DIR = Path("db/migrations")
 @app.command()
 def init(workspace: Path = WS_DEFAULT):
     ctx = OpsContext("agentlab-cli", "cli")
+    typer.echo(f"Initializing workspace at {workspace}")
+    typer.echo(f"Applying migrations from {MIGRATIONS_DIR}")
     db_path = init_db(ctx, workspace, MIGRATIONS_DIR)
     typer.echo(f"Initialized DB at {db_path}")
+    try:
+        con = sqlite3.connect(str(db_path))
+        rows = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+        con.close()
+        table_names = [r[0] for r in rows]
+        typer.echo("DB tables:")
+        for name in table_names:
+            typer.echo(f" - {name}")
+    except Exception as exc:
+        typer.echo(f"Failed to list tables: {exc}")
 
 @app.command()
 def search(query: str, workspace: Path = WS_DEFAULT, top_n: int = 10):
@@ -232,6 +248,15 @@ def cleanup_db(
 ):
     ctx = OpsContext("agentlab-cli", "cli")
     report = svc_cleanup_db(ctx, workspace, dry_run=dry_run)
+    typer.echo(json.dumps(report, indent=2))
+
+@app.command("cleanup-content")
+def cleanup_content(
+    workspace: Path = WS_DEFAULT,
+    dry_run: bool = typer.Option(True, "--dry-run/--apply", help="Preview deletions or apply them."),
+):
+    ctx = OpsContext("agentlab-cli", "cli")
+    report = svc_cleanup_content(ctx, workspace, dry_run=dry_run)
     typer.echo(json.dumps(report, indent=2))
 
 @app.command("delete-all-data")
