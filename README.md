@@ -68,6 +68,7 @@ Open: `workspace/exports/dashboard.md`
 ```bash
 agentlab search "asset tokenization market infrastructure" --top-n 8
 agentlab fetch <RUN_ID_FROM_SEARCH_OUTPUT>
+agentlab summarize docs <RUN_ID>
 agentlab index docs <RUN_ID>
 agentlab match ideas
 agentlab dashboard build

@@ -15,6 +15,7 @@ from agentlab.services.operations import (
     demo_seed as svc_demo_seed,
     fetch_run as svc_fetch_run,
     index_docs as svc_index_docs,
+    summarize_docs as svc_summarize_docs,
     init_db,
     judge_validity_report,
     match_all_docs as svc_match_all_docs,
@@ -164,6 +165,20 @@ def index_docs(run_id: str, workspace: Path = WS_DEFAULT):
     ctx = OpsContext("agentlab-cli", "cli")
     count = svc_index_docs(ctx, run_id, workspace)
     typer.echo(f"Indexed {count} docs")
+
+summarize_app = typer.Typer()
+app.add_typer(summarize_app, name="summarize")
+
+@summarize_app.command("docs")
+def summarize_docs(
+    run_id: str,
+    workspace: Path = WS_DEFAULT,
+    overwrite: bool = typer.Option(False, "--overwrite/--only-missing", help="Overwrite existing title/summary."),
+    prefer_chunking: bool = typer.Option(False, "--chunking/--no-chunking", help="Prefer chunked summarization."),
+):
+    ctx = OpsContext("agentlab-cli", "cli")
+    result = svc_summarize_docs(ctx, run_id, workspace, overwrite=overwrite, prefer_chunking=prefer_chunking)
+    typer.echo(f"Summarized {result['summarized']} docs (skipped={result['skipped']} failed={result['failed']})")
 
 idea_app = typer.Typer()
 app.add_typer(idea_app, name="idea")

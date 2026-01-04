@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -11,11 +12,9 @@ import yaml
 
 from agentlab.core.frontmatter import dump_md_with_frontmatter, parse_md_with_frontmatter
 from agentlab.core.paths import utc_now_iso
-from agentlab.pipeline.summarize import SYSTEM_SUMMARIZE
 from agentlab.pipeline.web import extract_readable_text
 from agentlab.skills_runtime.base import Skill, SkillSpec
 from agentlab.skills_runtime.ops_helpers import emit_status, end_ops_run, log_item_processing, perf_span, start_ops_run, use_tool
-from agentlab.skills_runtime.summarize_helpers import summarize_with_fallback
 
 
 def _db_path(workspace: Path) -> str:
@@ -764,9 +763,7 @@ class FetchUrls(Skill):
             "cap.query_rows",
             "cap.http_fetch",
             "cap.file_write",
-            "cap.llm_generate",
             "cap.env_check_db",
-            "cap.env_check_llm",
             "cap.ops_logging",
         ],
     )
@@ -809,7 +806,7 @@ class FetchUrls(Skill):
             env_skill.run(
                 orch,
                 db_path=_db_path(workspace),
-                require_llm=True,
+                require_llm=False,
                 auto_start=True,
                 agent_name=agent_name,
                 agent_type=agent_type,
@@ -833,6 +830,47 @@ class FetchUrls(Skill):
                     category="item",
                     metadata=span_meta,
                 ):
+                    fetched_res = use_tool(
+                        orch,
+                        capability="cap.query_rows",
+                        run_id=ops_run_id,
+                        skill_name=self.spec.name,
+                        parameters={"url": url},
+                        sql=(
+                            "SELECT id FROM item_processing "
+                            "WHERE item_type = 'document' "
+                            "AND stage = 'fetch' "
+                            "AND status = 'success' "
+                            "AND metadata_json LIKE ? "
+                            "LIMIT 1"
+                        ),
+                        params=[f"%\"url\": \"{url}\"%"],
+                        db_path=_db_path(workspace),
+                    )
+                    if not fetched_res.ok:
+                        raise RuntimeError(fetched_res.error)
+                    if fetched_res.data.get("rows"):
+                        skipped += 1
+                        emit_status(
+                            orch,
+                            run_id=ops_run_id,
+                            skill_name=self.spec.name,
+                            message=f"Skipping already fetched {url}",
+                            stage="fetch",
+                            log_fn=log_fn,
+                        )
+                        log_item_processing(
+                            orch,
+                            run_id=ops_run_id,
+                            skill_name=self.spec.name,
+                            item_type="document",
+                            item_id=str(uuid.uuid4()),
+                            stage="fetch",
+                            status="skipped_already_fetched",
+                            db_path=_db_path(workspace),
+                            metadata={"url": url},
+                        )
+                        continue
                     dup_res = use_tool(
                         orch,
                         capability="cap.query_rows",
@@ -890,24 +928,6 @@ class FetchUrls(Skill):
                     span_meta["doc_id"] = doc_id
                     title = ""
                     summary = ""
-                    summary_attempted = False
-                    if regenerate_summary or not (title and summary):
-                        summary_attempted = True
-                        prompt = text[:6000]
-                        prompt = f"URL: {url}\n\nCONTENT:\n{prompt}"
-                        llm_out = summarize_with_fallback(
-                            orch,
-                            run_id=ops_run_id,
-                            skill_name=self.spec.name,
-                            system=SYSTEM_SUMMARIZE,
-                            prompt=prompt,
-                            text=text,
-                            doc_id=doc_id,
-                            prefer_chunking=prefer_chunking,
-                            log_fn=log_fn,
-                        )
-                        title = llm_out.get("title") or title
-                        summary = llm_out.get("summary") or summary
                     doc_path = _dated_content_path(workspace, "documents", doc_id, "doc.md")
                     fm = {
                         "id": doc_id,
@@ -960,16 +980,6 @@ class FetchUrls(Skill):
                         db_path=_db_path(workspace),
                         metadata={"url": url, "path": str(doc_path)},
                     )
-                    if summary_attempted:
-                        log_item_processing(
-                            orch,
-                            run_id=ops_run_id,
-                            skill_name=self.spec.name,
-                            item_type="document", item_id=doc_id,
-                            stage="summary",
-                            status="success",
-                            db_path=_db_path(workspace),
-                        )
                     created.append(str(doc_path))
                     fetched += 1
                 if fetched % 5 == 0:
@@ -1561,6 +1571,406 @@ class MatchSingleDoc(Skill):
             if not match_res.ok:
                 raise RuntimeError(match_res.error)
             return match_res.data.get("matches", [])
+        except Exception:
+            status = "error"
+            raise
+        finally:
+            end_ops_run(orch, run_id=ops_run_id, status=status)
+
+
+class SummarizeDocuments(Skill):
+    spec = SkillSpec(
+        name="summarize_documents",
+        required_capabilities=[
+            "cap.file_read",
+            "cap.file_write",
+            "cap.summarize_document",
+            "cap.update_rows",
+            "cap.ops_logging",
+        ],
+    )
+
+    def run(
+        self,
+        orch,
+        *,
+        doc_paths: list[str],
+        workspace: Path,
+        prefer_chunking: bool = False,
+        overwrite: bool = False,
+        agent_name: str,
+        agent_type: str,
+        parent_run_id: str | None = None,
+        log_fn=None,
+    ) -> dict[str, int]:
+        ops_run_id = start_ops_run(
+            orch,
+            agent_name=agent_name,
+            agent_type=agent_type,
+            purpose="summarize-documents",
+            parent_run_id=parent_run_id,
+        )
+        status = "completed"
+        summarized = 0
+        skipped = 0
+        failed = 0
+        try:
+            for path_str in doc_paths:
+                path = Path(path_str)
+                read_res = use_tool(
+                    orch,
+                    capability="cap.file_read",
+                    run_id=ops_run_id,
+                    skill_name=self.spec.name,
+                    parameters={"path": str(path)},
+                    path=str(path),
+                )
+                if not read_res.ok:
+                    failed += 1
+                    log_item_processing(
+                        orch,
+                        run_id=ops_run_id,
+                        skill_name=self.spec.name,
+                        item_type="document",
+                        item_id=str(uuid.uuid4()),
+                        stage="summary",
+                        status="failed",
+                        db_path=_db_path(workspace),
+                        error=str(read_res.error),
+                        metadata={"path": str(path)},
+                    )
+                    continue
+                content = str(read_res.data.get("content") or "")
+                md = parse_md_with_frontmatter(content)
+                fm = md.frontmatter
+                body = md.body
+                doc_id = str(fm.get("id") or "").strip() or str(uuid.uuid4())
+                url = str(fm.get("url") or "").strip()
+                existing_title = str(fm.get("title") or "").strip()
+                existing_summary = str(fm.get("summary") or "").strip()
+                if not overwrite and existing_title and existing_summary:
+                    skipped += 1
+                    log_item_processing(
+                        orch,
+                        run_id=ops_run_id,
+                        skill_name=self.spec.name,
+                        item_type="document",
+                        item_id=doc_id,
+                        stage="summary",
+                        status="skipped_existing",
+                        db_path=_db_path(workspace),
+                        metadata={"path": str(path), "url": url},
+                    )
+                    continue
+                text = body.strip()
+                if not text:
+                    skipped += 1
+                    log_item_processing(
+                        orch,
+                        run_id=ops_run_id,
+                        skill_name=self.spec.name,
+                        item_type="document",
+                        item_id=doc_id,
+                        stage="summary",
+                        status="skipped_empty",
+                        db_path=_db_path(workspace),
+                        metadata={"path": str(path), "url": url},
+                    )
+                    continue
+                summarize_res = use_tool(
+                    orch,
+                    capability="cap.summarize_document",
+                    run_id=ops_run_id,
+                    skill_name=self.spec.name,
+                    parameters={"path": str(path), "prefer_chunking": prefer_chunking},
+                    text=text,
+                    url=url or None,
+                    prefer_chunking=prefer_chunking,
+                )
+                if not summarize_res.ok:
+                    failed += 1
+                    log_item_processing(
+                        orch,
+                        run_id=ops_run_id,
+                        skill_name=self.spec.name,
+                        item_type="document",
+                        item_id=doc_id,
+                        stage="summary",
+                        status="failed",
+                        db_path=_db_path(workspace),
+                        error=str(summarize_res.error),
+                        metadata={"path": str(path), "url": url},
+                    )
+                    continue
+                data = summarize_res.data or {}
+                title = str(data.get("title") or existing_title).strip()
+                summary = str(data.get("summary") or existing_summary).strip()
+                fm["title"] = title
+                fm["summary"] = summary
+                write_res = use_tool(
+                    orch,
+                    capability="cap.file_write",
+                    run_id=ops_run_id,
+                    skill_name=self.spec.name,
+                    parameters={"path": str(path)},
+                    path=str(path),
+                    content=dump_md_with_frontmatter(fm, body),
+                )
+                if not write_res.ok:
+                    failed += 1
+                    log_item_processing(
+                        orch,
+                        run_id=ops_run_id,
+                        skill_name=self.spec.name,
+                        item_type="document",
+                        item_id=doc_id,
+                        stage="summary",
+                        status="failed",
+                        db_path=_db_path(workspace),
+                        error=str(write_res.error),
+                        metadata={"path": str(path), "url": url},
+                    )
+                    continue
+                update_res = use_tool(
+                    orch,
+                    capability="cap.update_rows",
+                    run_id=ops_run_id,
+                    skill_name=self.spec.name,
+                    sql="UPDATE documents SET title = ?, summary = ? WHERE id = ?",
+                    params=[title, summary, doc_id],
+                    db_path=_db_path(workspace),
+                )
+                if not update_res.ok:
+                    failed += 1
+                    log_item_processing(
+                        orch,
+                        run_id=ops_run_id,
+                        skill_name=self.spec.name,
+                        item_type="document",
+                        item_id=doc_id,
+                        stage="summary",
+                        status="failed",
+                        db_path=_db_path(workspace),
+                        error=str(update_res.error),
+                        metadata={"path": str(path), "url": url},
+                    )
+                    continue
+                summarized += 1
+                log_item_processing(
+                    orch,
+                    run_id=ops_run_id,
+                    skill_name=self.spec.name,
+                    item_type="document",
+                    item_id=doc_id,
+                    stage="summary",
+                    status="success",
+                    db_path=_db_path(workspace),
+                    metadata={"path": str(path), "url": url},
+                )
+                if log_fn and summarized % 5 == 0:
+                    log_fn(f"[summary] processed {summarized} docs")
+            return {"summarized": summarized, "skipped": skipped, "failed": failed}
+        except Exception:
+            status = "error"
+            raise
+        finally:
+            end_ops_run(orch, run_id=ops_run_id, status=status)
+
+
+class MatchLearning(Skill):
+    spec = SkillSpec(
+        name="match_learning",
+        required_capabilities=[
+            "cap.query_rows",
+            "cap.persist_rows",
+            "cap.file_read",
+            "cap.file_write",
+            "cap.ops_logging",
+        ],
+    )
+
+    def run(
+        self,
+        orch,
+        *,
+        workspace: Path,
+        agent_name: str,
+        agent_type: str,
+        parent_run_id: str | None = None,
+        rules_path: Path | None = None,
+        high_threshold: int = 8,
+        low_threshold: int = 4,
+    ) -> dict[str, Any]:
+        ops_run_id = start_ops_run(
+            orch,
+            agent_name=agent_name,
+            agent_type=agent_type,
+            purpose="match-learning",
+            parent_run_id=parent_run_id,
+        )
+        status = "completed"
+
+        def _tokenize(text: str) -> list[str]:
+            return [t for t in re.split(r"\W+", text.lower()) if len(t) > 3]
+
+        def _rules_defaults() -> dict[str, Any]:
+            return {
+                "version": 0,
+                "last_updated": "",
+                "thresholds": {"high_score": high_threshold, "low_score": low_threshold},
+                "rules": [],
+            }
+
+        try:
+            rules_file = rules_path or Path("skills") / "match-learning" / "references" / "rules.yaml"
+            rules_data = _rules_defaults()
+            read_res = use_tool(
+                orch,
+                capability="cap.file_read",
+                run_id=ops_run_id,
+                skill_name=self.spec.name,
+                parameters={"path": str(rules_file)},
+                path=str(rules_file),
+            )
+            if read_res.ok:
+                raw = str(read_res.data.get("content") or "")
+                if raw.strip():
+                    try:
+                        parsed = yaml.safe_load(raw)
+                        if isinstance(parsed, dict):
+                            rules_data.update(parsed)
+                    except Exception:
+                        rules_data = _rules_defaults()
+
+            rules_data["thresholds"] = {"high_score": high_threshold, "low_score": low_threshold}
+            rules_version = int(rules_data.get("version") or 0) + 1
+
+            rows_res = use_tool(
+                orch,
+                capability="cap.query_rows",
+                run_id=ops_run_id,
+                skill_name=self.spec.name,
+                sql=(
+                    "SELECT id, match_score, review_score, review_notes, reasons_json "
+                    "FROM matches WHERE review_score IS NOT NULL"
+                ),
+                params=[],
+                db_path=_db_path(workspace),
+            )
+            if not rows_res.ok:
+                raise RuntimeError(rows_res.error)
+            rows = rows_res.data.get("rows", [])
+
+            high_rows = []
+            low_rows = []
+            for row in rows:
+                score = row.get("review_score")
+                if score is None:
+                    continue
+                try:
+                    score_val = float(score)
+                except Exception:
+                    continue
+                if score_val >= high_threshold:
+                    high_rows.append(row)
+                elif score_val <= low_threshold:
+                    low_rows.append(row)
+
+            def _tokens_for_row(row: dict[str, Any]) -> list[str]:
+                parts: list[str] = []
+                notes = row.get("review_notes") or ""
+                if notes:
+                    parts.append(str(notes))
+                reasons_raw = row.get("reasons_json") or ""
+                if reasons_raw:
+                    try:
+                        reasons_obj = json.loads(str(reasons_raw))
+                        parts.append(json.dumps(reasons_obj))
+                    except Exception:
+                        parts.append(str(reasons_raw))
+                return _tokenize(" ".join(parts))
+
+            high_terms = Counter()
+            low_terms = Counter()
+            for row in high_rows:
+                high_terms.update(_tokens_for_row(row))
+            for row in low_rows:
+                low_terms.update(_tokens_for_row(row))
+
+            rule_entry = {
+                "id": str(uuid.uuid4()),
+                "status": "proposed",
+                "created_at": utc_now_iso(),
+                "description": f"Match learning update from {len(high_rows)} high and {len(low_rows)} low reviews.",
+                "evidence": {
+                    "top_terms_high": [t for t, _ in high_terms.most_common(10)],
+                    "top_terms_low": [t for t, _ in low_terms.most_common(10)],
+                },
+                "notes": "Auto-generated; review before applying.",
+            }
+            rules_list = list(rules_data.get("rules") or [])
+            rules_list.append(rule_entry)
+            rules_data["rules"] = rules_list
+            rules_data["version"] = rules_version
+            rules_data["last_updated"] = utc_now_iso()
+
+            rules_content = yaml.safe_dump(rules_data, sort_keys=False)
+            write_res = use_tool(
+                orch,
+                capability="cap.file_write",
+                run_id=ops_run_id,
+                skill_name=self.spec.name,
+                parameters={"path": str(rules_file)},
+                path=str(rules_file),
+                content=rules_content,
+            )
+            if not write_res.ok:
+                raise RuntimeError(write_res.error)
+
+            reviewed = len(rows)
+            high_count = len(high_rows)
+            low_count = len(low_rows)
+            denom = high_count + low_count
+            precision = (high_count / denom) if denom > 0 else None
+            recall = (high_count / reviewed) if reviewed > 0 else None
+            notes = f"neutral={reviewed - high_count - low_count}"
+
+            metrics_res = use_tool(
+                orch,
+                capability="cap.persist_rows",
+                run_id=ops_run_id,
+                skill_name=self.spec.name,
+                parameters={"table": "match_learning_metrics", "mode": "insert"},
+                table="match_learning_metrics",
+                rows=[
+                    {
+                        "id": str(uuid.uuid4()),
+                        "ruleset_version": rules_version,
+                        "precision": precision,
+                        "recall": recall,
+                        "high_threshold": high_threshold,
+                        "low_threshold": low_threshold,
+                        "samples_high": high_count,
+                        "samples_low": low_count,
+                        "created_at": utc_now_iso(),
+                        "notes": notes,
+                    }
+                ],
+                mode="insert",
+                db_path=_db_path(workspace),
+            )
+            if not metrics_res.ok:
+                raise RuntimeError(metrics_res.error)
+
+            return {
+                "rules_path": str(rules_file),
+                "ruleset_version": rules_version,
+                "reviewed": reviewed,
+                "high": high_count,
+                "low": low_count,
+                "precision": precision,
+                "recall": recall,
+            }
         except Exception:
             status = "error"
             raise

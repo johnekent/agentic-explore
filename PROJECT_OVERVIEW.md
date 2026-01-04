@@ -8,7 +8,7 @@ Its goal is to **augment human research and sensemaking**, not replace it.
 The system continuously:
 - searches for external information (primarily internet sources),
 - extracts and normalizes content,
-- categorizes and indexes it,
+- categorizes it and indexes it (indexing runs as a separate step from fetch),
 - maintains a persistent backlog of human-generated ideas/problems,
 - matches research findings to those ideas/problems,
 - scores relevance on a 0–10 scale,
@@ -113,7 +113,7 @@ This is intentionally **not** an autonomous system. Humans remain the final judg
 2. The service layer starts an **agent run** (purpose + parent lineage if any).
 3. The service layer invokes a skill, which uses the orchestrator to map capabilities to tools.
 4. Tools perform side effects and may call pipeline helpers.
-5. Results are written to Markdown artifacts and indexed in SQLite.
+5. Results are written to Markdown artifacts; indexing into SQLite happens as a separate skill.
 6. Skills emit progress/status into `agent_interactions` for UI/CLI visibility.
 7. The UI reads SQLite tables and renders both domain outputs and ops lineage.
 
@@ -191,6 +191,7 @@ Examples:
 - classify-document-multi-taxonomy
 - index-upsert-document
 - match-idea-to-docs
+- match-learning
 - dashboard-build
 
 Skills do **not** decide when to run. They only perform their task.
@@ -244,7 +245,7 @@ Codex / agents making changes **must respect these constraints**:
 2. Agent searches for relevant information
 3. Agent extracts and normalizes documents
 4. Agent classifies documents (proposed labels)
-5. Agent indexes everything
+5. Agent indexes fetched documents
 6. Agent matches documents ↔ ideas
 7. Human reviews matches and scores relevance
 8. Human edits artifacts if needed

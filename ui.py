@@ -27,6 +27,7 @@ from agentlab.services.operations import (
     init_db,
     validate_environment,
     resummarize_documents,
+    summarize_documents,
     search_local,
     search_semantic,
     search_web,
@@ -216,7 +217,7 @@ doc_embeds = pipeline.get("doc_embeddings")
 idea_embeds = pipeline.get("idea_embeddings")
 if st.sidebar.button("Refresh status"):
     st.rerun()
-st.sidebar.caption("Flow: search -> fetch -> index -> local search -> matching")
+st.sidebar.caption("Flow: research trends -> fetch -> index -> identify -> prioritize -> track")
 st.sidebar.metric("Web search runs", pipeline.get("runs") if pipeline.get("runs") is not None else "unknown")
 st.sidebar.metric("Search hits (all runs)", pipeline.get("run_hits") if pipeline.get("run_hits") is not None else "unknown")
 st.sidebar.metric("Fetched (success)", pipeline.get("fetch_success") if pipeline.get("fetch_success") is not None else "unknown")
@@ -237,18 +238,19 @@ if ideas_total is not None and idea_embeds is not None:
     st.sidebar.progress(0 if ideas_total == 0 else min(1.0, idea_embeds / max(ideas_total, 1)))
 else:
     st.sidebar.write("Local search enabled (ideas): unknown")
-st.sidebar.caption("Dependencies: fetch creates docs; index enables search/matching.")
+st.sidebar.caption("Dependencies: fetch creates docs; index enables identify/matching.")
 
 tabs = st.tabs([
-    "1 Source",
-    "2 Identify",
-    "3 Prioritize",
-    "4 Track",
+    "1 Research Trends",
+    "2 Idea Management",
+    "3 Identify",
+    "4 Prioritize",
+    "5 Track",
     "Monitor",
 ])
 
 with tabs[0]:
-    st.header("Source Information")
+    st.header("Research Trends")
     st.subheader("Web Search")
     query = st.text_input("Query", key="web_query")
     top_n = st.slider("Top N", 1, 20, 10, key="web_top_n")
@@ -258,6 +260,7 @@ with tabs[0]:
             st.session_state["search_results"] = result["hits"]
             st.session_state["search_run_id"] = result["run_id"]
             st.success(f"Found {len(result['hits'])} results")
+            st.rerun()
         else:
             st.error("Enter a query")
 
@@ -265,99 +268,447 @@ with tabs[0]:
         df = pd.DataFrame([h.__dict__ for h in st.session_state["search_results"]])
         st.dataframe(df)
 
-    st.header("Fetch Documents")
-    try:
-        runs = list_runs(ctx, ws, limit=25)
-        if runs:
-            run_options = []
-            for r in runs:
-                run_id = r.get("run_id")
-                topic = r.get("topic") or ""
-                started_at = r.get("started_at") or ""
-                run_options.append((run_id, f"{run_id} | {topic} | {started_at}"))
-            selected_label = st.selectbox(
-                "Select Run",
-                [label for _, label in run_options],
-                index=0,
-                key="fetch_run_select",
-            )
-            selected_run_id = None
-            for rid, label in run_options:
-                if label == selected_label:
-                    selected_run_id = rid
-                    break
-            if selected_run_id:
-                st.session_state["selected_run_id"] = selected_run_id
-                st.session_state["loaded_run"] = load_run(ctx, ws, selected_run_id)
-        else:
-            st.info("No runs found.")
-    except Exception as exc:
-        st.error(f"Run listing failed: {exc}")
+    st.header("Sources")
+    runs_rows = query_rows(
+        ctx,
+        "SELECT run_id, topic, started_at, outputs_json FROM runs ORDER BY started_at DESC LIMIT 200",
+        [],
+        workspace=ws,
+    )
+    fetch_logs = query_rows(
+        ctx,
+        """
+        SELECT item_id, status, metadata_json, started_at
+        FROM item_processing
+        WHERE item_type = 'document'
+          AND stage = 'fetch'
+        ORDER BY started_at DESC
+        LIMIT 1000
+        """,
+        [],
+        workspace=ws,
+    )
+    summary_logs = query_rows(
+        ctx,
+        """
+        SELECT item_id, status
+        FROM item_processing
+        WHERE item_type = 'document'
+          AND stage = 'summary'
+        """,
+        [],
+        workspace=ws,
+    )
+    index_logs = query_rows(
+        ctx,
+        """
+        SELECT item_id, status
+        FROM item_processing
+        WHERE item_type = 'document'
+          AND stage = 'index'
+        """,
+        [],
+        workspace=ws,
+    )
+    doc_rows = query_rows(
+        ctx,
+        "SELECT id, title, url, summary, content_path, retrieved_at FROM documents ORDER BY retrieved_at DESC LIMIT 500",
+        [],
+        workspace=ws,
+    )
+    fetch_by_url = {}
+    for row in fetch_logs:
+        meta = {}
+        raw_meta = row.get("metadata_json") or ""
+        if raw_meta:
+            try:
+                meta = json.loads(raw_meta)
+            except Exception:
+                meta = {}
+        url = meta.get("url")
+        if url and url not in fetch_by_url:
+            fetch_by_url[url] = {
+                "item_id": row.get("item_id"),
+                "status": row.get("status"),
+                "path": meta.get("path"),
+            }
+    summary_success = {r.get("item_id") for r in summary_logs if r.get("status") == "success"}
+    summary_failed = {r.get("item_id") for r in summary_logs if r.get("status") == "failed"}
+    index_success = {r.get("item_id") for r in index_logs if r.get("status") == "success"}
+    index_failed = {r.get("item_id") for r in index_logs if r.get("status") == "failed"}
+    doc_by_url = {r.get("url"): r for r in doc_rows if r.get("url")}
 
-    if 'search_results' in st.session_state or "loaded_run" in st.session_state:
-        urls = []
-        if 'search_results' in st.session_state:
-            urls.extend([h.url for h in st.session_state['search_results']])
-        if "loaded_run" in st.session_state:
-            run_outputs = st.session_state["loaded_run"].get("outputs", {}) or {}
-            candidates = run_outputs.get("candidates", [])
-            created = run_outputs.get("documents_created", [])
-            summary = run_outputs.get("summary") or {}
-            urls.extend([c.get("url") for c in candidates])
-            st.subheader("Selected Run Summary")
-            st.write(f"Search hits: {summary.get('hits', len(candidates))}")
-            st.write(f"Fetched documents from run: {summary.get('fetched', len(created))}")
-            st.write(f"Indexed documents from run: {summary.get('indexed', 0)}")
-            st.write(f"Skipped (duplicates): {summary.get('skipped', 0)}")
-            st.write(f"Failed to fetch: {summary.get('failed', 0)}")
-            if candidates:
-                st.caption("Fetch and index are separate steps.")
-        urls = [u for u in urls if u]
-        urls = list(dict.fromkeys(urls))
-        select_all = st.checkbox("Select all URLs", key="select_all_urls")
-        if select_all:
-            st.session_state["fetch_urls_selected"] = urls
-        selected = st.multiselect(
-            "Select URLs to fetch",
-            urls,
-            key="fetch_urls_selected",
+    candidate_rows = []
+    candidate_urls = set()
+    session_results = st.session_state.get("search_results", [])
+    session_run_id = st.session_state.get("search_run_id") or "session"
+    for h in session_results:
+        url = getattr(h, "url", None)
+        if not url:
+            continue
+        candidate_urls.add(url)
+        fetch_info = fetch_by_url.get(url, {})
+        doc_row = doc_by_url.get(url, {})
+        fetch_status = "not_fetched"
+        if fetch_info:
+            if fetch_info.get("status") == "success":
+                fetch_status = "fetched"
+            elif fetch_info.get("status") == "failed":
+                fetch_status = "fetch_failed"
+            else:
+                fetch_status = fetch_info.get("status") or "fetched"
+        elif doc_row:
+            fetch_status = "fetched"
+        doc_id = fetch_info.get("item_id") or doc_row.get("id")
+        summary_status = "not_summarized"
+        if doc_id in summary_success:
+            summary_status = "summarized"
+        elif doc_id in summary_failed:
+            summary_status = "summary_failed"
+        elif doc_row and str(doc_row.get("summary") or "").strip():
+            summary_status = "summarized"
+        index_status = "not_indexed"
+        if doc_id in index_success:
+            index_status = "indexed"
+        elif doc_id in index_failed:
+            index_status = "index_failed"
+        candidate_rows.append(
+            {
+                "source_type": "url",
+                "title": getattr(h, "title", "") or "",
+                "url_or_path": url,
+                "run_id": session_run_id,
+                "topic": "",
+                "fetch_status": fetch_status,
+                "index_status": index_status,
+                "content_path": fetch_info.get("path") or doc_row.get("content_path") or "",
+            }
         )
-        regenerate = st.checkbox("Regenerate title/summary (LLM)", key="fetch_regen")
-        chunking = st.checkbox("Prefer chunked summarization", value=True, key="fetch_chunking")
-        fetch_col, index_col = st.columns(2)
-        with fetch_col:
-            if st.button("Fetch"):
-                status = st.status("Fetching...", expanded=True)
-                log_fn, _ = make_status_logger(status)
-                result = fetch_urls(
-                    ctx,
-                    selected,
-                    ws,
-                    regenerate_summary=regenerate,
-                    prefer_chunking=chunking,
-                    log_fn=log_fn,
-                )
-                status.update(label="Fetch complete.", state="complete")
-                st.session_state["last_fetch_created"] = result.get("created_docs", [])
-                if result["fetched"] > 0:
-                    st.success(f"Fetched {result['fetched']} documents")
-                if result["failed_urls"]:
-                    st.warning("Failed to fetch some URLs:")
-                    for fail in result["failed_urls"]:
-                        st.write(fail)
-        with index_col:
-            can_index = bool(st.session_state.get("last_fetch_created"))
-            if st.button("Index fetched docs", disabled=not can_index):
-                status = st.status("Indexing fetched docs...", expanded=True)
-                result = index_documents(ctx, st.session_state["last_fetch_created"], ws)
-                status.update(label="Index complete.", state="complete")
-                st.success(f"Indexed {result['indexed']} documents")
-                if result.get("failed"):
-                    st.warning(f"Failed to index {result['failed']} documents")
-    else:
-        st.info("Search first")
+    for r in runs_rows:
+        outputs = {}
+        raw_outputs = r.get("outputs_json") or ""
+        if raw_outputs:
+            try:
+                outputs = json.loads(raw_outputs)
+            except Exception:
+                outputs = {}
+        for c in outputs.get("candidates", []) or []:
+            if not isinstance(c, dict):
+                continue
+            url = c.get("url")
+            if not url:
+                continue
+            candidate_urls.add(url)
+            fetch_info = fetch_by_url.get(url, {})
+            doc_row = doc_by_url.get(url, {})
+            fetch_status = "not_fetched"
+            if fetch_info:
+                if fetch_info.get("status") == "success":
+                    fetch_status = "fetched"
+                elif fetch_info.get("status") == "failed":
+                    fetch_status = "fetch_failed"
+                else:
+                    fetch_status = fetch_info.get("status") or "fetched"
+            elif doc_row:
+                fetch_status = "fetched"
+            doc_id = fetch_info.get("item_id") or doc_row.get("id")
+            summary_status = "not_summarized"
+            if doc_id in summary_success:
+                summary_status = "summarized"
+            elif doc_id in summary_failed:
+                summary_status = "summary_failed"
+            elif doc_row and str(doc_row.get("summary") or "").strip():
+                summary_status = "summarized"
+            index_status = "not_indexed"
+            if doc_id in index_success:
+                index_status = "indexed"
+            elif doc_id in index_failed:
+                index_status = "index_failed"
+            candidate_rows.append(
+                {
+                    "source_type": "url",
+                    "title": c.get("title") or "",
+                    "url_or_path": url,
+                    "run_id": r.get("run_id") or "",
+                    "topic": r.get("topic") or "",
+                    "fetch_status": fetch_status,
+                    "summary_status": summary_status,
+                    "index_status": index_status,
+                    "content_path": fetch_info.get("path") or doc_row.get("content_path") or "",
+                }
+            )
 
-    st.header("Add Idea")
+    extra_rows = []
+    for d in doc_rows:
+        url = d.get("url")
+        if url and url in candidate_urls:
+            continue
+        source_type = "file" if not url else "url"
+        fetch_status = "uploaded" if not url else "fetched"
+        doc_id = d.get("id")
+        summary_status = "not_summarized"
+        if doc_id in summary_success:
+            summary_status = "summarized"
+        elif doc_id in summary_failed:
+            summary_status = "summary_failed"
+        elif str(d.get("summary") or "").strip():
+            summary_status = "summarized"
+        index_status = "indexed" if doc_id in index_success else "not_indexed"
+        extra_rows.append(
+            {
+                "source_type": source_type,
+                "title": d.get("title") or "",
+                "url_or_path": url or d.get("content_path") or "",
+                "run_id": "",
+                "topic": "",
+                "fetch_status": fetch_status,
+                "summary_status": summary_status,
+                "index_status": index_status,
+                "content_path": d.get("content_path") or "",
+            }
+        )
+
+    sources_df = pd.DataFrame(candidate_rows + extra_rows)
+    if sources_df.empty:
+        st.info("No sources found yet.")
+    else:
+        fetch_options = sorted(sources_df["fetch_status"].dropna().unique().tolist())
+        summary_options = sorted(sources_df["summary_status"].dropna().unique().tolist())
+        index_options = sorted(sources_df["index_status"].dropna().unique().tolist())
+        fetch_filter, summary_filter, index_filter = st.columns(3)
+        with fetch_filter:
+            fetch_filter_vals = st.multiselect(
+                "Filter by fetch status",
+                fetch_options,
+                default=fetch_options,
+                key="sources_fetch_filter",
+            )
+        with summary_filter:
+            summary_filter_vals = st.multiselect(
+                "Filter by summary status",
+                summary_options,
+                default=summary_options,
+                key="sources_summary_filter",
+            )
+        with index_filter:
+            index_filter_vals = st.multiselect(
+                "Filter by index status",
+                index_options,
+                default=index_options,
+                key="sources_index_filter",
+            )
+        sources_df = sources_df.copy()
+        sources_df["row_key"] = (
+            sources_df["source_type"].astype(str)
+            + "|"
+            + sources_df["url_or_path"].astype(str)
+            + "|"
+            + sources_df["run_id"].astype(str)
+            + "|"
+            + sources_df["content_path"].astype(str)
+        )
+        filtered = sources_df[
+            sources_df["fetch_status"].isin(fetch_filter_vals)
+            & sources_df["summary_status"].isin(summary_filter_vals)
+            & sources_df["index_status"].isin(index_filter_vals)
+        ].copy()
+        eligible_fetch = filtered["fetch_status"].isin(["not_fetched", "fetch_failed"])
+        eligible_summarize = (
+            filtered["fetch_status"].isin(["fetched", "skipped_already_fetched", "uploaded"])
+            & filtered["summary_status"].isin(["not_summarized", "summary_failed"])
+            & filtered["content_path"].astype(str).str.len().gt(0)
+        )
+        eligible_index = (
+            filtered["summary_status"].eq("summarized")
+            & filtered["index_status"].isin(["not_indexed", "index_failed"])
+            & filtered["content_path"].astype(str).str.len().gt(0)
+        )
+        selection_state = st.session_state.get("sources_selection", {})
+        filtered.insert(
+            0,
+            "select_fetch",
+            filtered["row_key"].map(
+                lambda key: bool(selection_state.get(key, {}).get("fetch", False))
+            ),
+        )
+        filtered.insert(
+            1,
+            "select_summarize",
+            filtered["row_key"].map(
+                lambda key: bool(selection_state.get(key, {}).get("summarize", False))
+            ),
+        )
+        filtered.insert(
+            2,
+            "select_index",
+            filtered["row_key"].map(
+                lambda key: bool(selection_state.get(key, {}).get("index", False))
+            ),
+        )
+        filtered["fetch_action"] = eligible_fetch.map(lambda ok: "eligible" if ok else "locked")
+        filtered["summary_action"] = eligible_summarize.map(lambda ok: "eligible" if ok else "locked")
+        filtered["index_action"] = eligible_index.map(lambda ok: "eligible" if ok else "locked")
+        select_fetch_col, select_sum_col, select_index_col = st.columns(3)
+        with select_fetch_col:
+            if st.button("Select all unfetched", key="sources_select_all_fetch"):
+                for row_key, is_eligible in zip(filtered["row_key"], eligible_fetch):
+                    selection_state[row_key] = {
+                        "fetch": bool(is_eligible),
+                        "summarize": bool(selection_state.get(row_key, {}).get("summarize", False)),
+                        "index": bool(selection_state.get(row_key, {}).get("index", False)),
+                    }
+                st.session_state["sources_selection"] = selection_state
+                st.rerun()
+        with select_sum_col:
+            if st.button("Select all unsummarized", key="sources_select_all_summarize"):
+                for row_key, is_eligible in zip(filtered["row_key"], eligible_summarize):
+                    selection_state[row_key] = {
+                        "fetch": bool(selection_state.get(row_key, {}).get("fetch", False)),
+                        "summarize": bool(is_eligible),
+                        "index": bool(selection_state.get(row_key, {}).get("index", False)),
+                    }
+                st.session_state["sources_selection"] = selection_state
+                st.rerun()
+        with select_index_col:
+            if st.button("Select all unindexed", key="sources_select_all_index"):
+                for row_key, is_eligible in zip(filtered["row_key"], eligible_index):
+                    selection_state[row_key] = {
+                        "fetch": bool(selection_state.get(row_key, {}).get("fetch", False)),
+                        "summarize": bool(selection_state.get(row_key, {}).get("summarize", False)),
+                        "index": bool(is_eligible),
+                    }
+                st.session_state["sources_selection"] = selection_state
+                st.rerun()
+        disabled_columns = [
+            c
+            for c in filtered.columns
+            if c not in ["select_fetch", "select_summarize", "select_index"]
+        ]
+        edited = st.data_editor(
+            filtered.drop(columns=["row_key"]),
+            width="stretch",
+            hide_index=True,
+            disabled=disabled_columns,
+            column_config={
+                "select_fetch": st.column_config.CheckboxColumn("Fetch"),
+                "select_summarize": st.column_config.CheckboxColumn("Summarize"),
+                "select_index": st.column_config.CheckboxColumn("Index"),
+            },
+            key="sources_editor",
+        )
+        updated_selection = {}
+        for _, row in edited.iterrows():
+            row_key = (
+                str(row.get("source_type"))
+                + "|"
+                + str(row.get("url_or_path"))
+                + "|"
+                + str(row.get("run_id"))
+                + "|"
+                + str(row.get("content_path"))
+            )
+            updated_selection[row_key] = {
+                "fetch": bool(row.get("select_fetch"))
+                if row.get("fetch_action") == "eligible"
+                else False,
+                "summarize": bool(row.get("select_summarize"))
+                if row.get("summary_action") == "eligible"
+                else False,
+                "index": bool(row.get("select_index"))
+                if row.get("index_action") == "eligible"
+                else False,
+            }
+        st.session_state["sources_selection"] = updated_selection
+        to_fetch = (
+            edited[edited["select_fetch"] == True]  # noqa: E712
+            .loc[lambda df: df["fetch_action"] == "eligible"]
+            ["url_or_path"]
+            .dropna()
+            .tolist()
+        )
+        to_summarize = (
+            edited[edited["select_summarize"] == True]  # noqa: E712
+            .loc[lambda df: df["summary_action"] == "eligible"]
+            ["content_path"]
+            .dropna()
+            .tolist()
+        )
+        to_index = (
+            edited[edited["select_index"] == True]  # noqa: E712
+            .loc[lambda df: df["index_action"] == "eligible"]
+            ["content_path"]
+            .dropna()
+            .tolist()
+        )
+        (
+            fetch_btn_col,
+            fetch_opts_col,
+            sum_btn_col,
+            sum_opts_col,
+            index_btn_col,
+            index_opts_col,
+        ) = st.columns([1, 2, 1, 2, 1, 2])
+        with fetch_btn_col:
+            fetch_clicked = st.button("Fetch selected", disabled=not to_fetch)
+        with fetch_opts_col:
+            st.caption("Fetch options: none")
+        with sum_btn_col:
+            summarize_clicked = st.button("Summarize selected", disabled=not to_summarize)
+        with sum_opts_col:
+            overwrite = st.checkbox("Overwrite existing title/summary", key="summary_overwrite")
+            prefer_chunking = st.checkbox(
+                "Prefer chunked summarization",
+                value=False,
+                key="summary_chunking",
+            )
+        with index_btn_col:
+            index_clicked = st.button("Index selected", disabled=not to_index)
+        with index_opts_col:
+            st.caption("Index options: none")
+        if fetch_clicked:
+            status = st.status("Fetching...", expanded=True)
+            log_fn, _ = make_status_logger(status)
+            result = fetch_urls(
+                ctx,
+                to_fetch,
+                ws,
+                regenerate_summary=False,
+                prefer_chunking=False,
+                log_fn=log_fn,
+            )
+            status.update(label="Fetch complete.", state="complete")
+            st.session_state["last_fetch_created"] = result.get("created_docs", [])
+            if result["fetched"] > 0:
+                st.success(f"Fetched {result['fetched']} documents")
+            if result["failed_urls"]:
+                st.warning("Failed to fetch some URLs:")
+                for fail in result["failed_urls"]:
+                    st.write(fail)
+        if summarize_clicked:
+            status = st.status("Summarizing...", expanded=True)
+            log_fn, _ = make_status_logger(status)
+            result = summarize_documents(
+                ctx,
+                to_summarize,
+                ws,
+                prefer_chunking=prefer_chunking,
+                overwrite=overwrite,
+                log_fn=log_fn,
+            )
+            status.update(label="Summarize complete.", state="complete")
+            st.success(f"Summarized {result['summarized']} documents")
+            if result.get("failed"):
+                st.warning(f"Failed to summarize {result['failed']} documents")
+        if index_clicked:
+            status = st.status("Indexing...", expanded=True)
+            result = index_documents(ctx, to_index, ws)
+            status.update(label="Index complete.", state="complete")
+            st.success(f"Indexed {result['indexed']} documents")
+            if result.get("failed"):
+                st.warning(f"Failed to index {result['failed']} documents")
+
+with tabs[1]:
+    st.header("Idea Management")
     title = st.text_input("Title")
     statement = st.text_area("Statement")
     if st.button("Add"):
@@ -369,7 +720,7 @@ with tabs[0]:
         else:
             st.error("Fill fields")
 
-with tabs[1]:
+with tabs[2]:
     st.header("Identify Possible Work")
     st.subheader("Local Search")
     search_mode = st.radio("Mode", ["Semantic (default)", "Keyword"], horizontal=True, key="local_mode")
@@ -482,7 +833,7 @@ with tabs[1]:
         st.subheader("Re-summarize Logs")
         st.text("\n".join(st.session_state["resum_logs"]))
 
-with tabs[2]:
+with tabs[3]:
     st.header("Prioritize Work")
 
     st.subheader("Create Task from Match")
@@ -516,7 +867,7 @@ with tabs[2]:
     else:
         st.info("No active tasks.")
 
-with tabs[3]:
+with tabs[4]:
     st.header("Track Execution")
     st.subheader("Task Backlog")
     if st.button("Refresh Backlog"):
@@ -549,7 +900,7 @@ with tabs[3]:
         else:
             st.info("No tasks to display.")
 
-with tabs[4]:
+with tabs[5]:
     st.header("Monitor")
     st.subheader("Environment Validation")
     require_llm = st.checkbox("Require LLM (Ollama)", value=True, key="env_require_llm")
@@ -605,7 +956,7 @@ with tabs[4]:
         edit_df["delete"] = False
         edited = st.data_editor(
             edit_df,
-            use_container_width=True,
+            width="stretch",
             num_rows="fixed",
             hide_index=True,
             column_config={"delete": st.column_config.CheckboxColumn("Delete")},

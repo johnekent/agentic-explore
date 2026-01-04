@@ -21,6 +21,7 @@ from agentlab.tools.plan_tools import (
     plan_update_status_tool,
 )
 from agentlab.tools.sqlite_tools import delete_rows, migrate_db, persist_rows, query_rows, update_rows
+from agentlab.tools.summarize_tools import summarize_document
 from agentlab.tools.vector_tools import vector_index, vector_query, vector_stats
 from agentlab.tools.web_tools import fetch_url, search_web
 
@@ -49,6 +50,7 @@ def build_registry() -> ToolRegistry:
         "index_idea": index_idea,
         "local_exec": local_exec,
         "llm_generate": llm_generate,
+        "summarize_document": summarize_document,
         "ops_log": ops_log,
         "search_web": search_web,
         "fetch_url": fetch_url,

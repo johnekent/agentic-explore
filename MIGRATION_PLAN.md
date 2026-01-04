@@ -21,7 +21,8 @@ If memory is lost: read `ARCHITECTURE_TARGET.md` first, then execute the Next St
 - `build_embeddings` -> skill `embeddings_build` -> tool `vector_index` (new)
 - `search_semantic` -> skill `search_semantic` -> tool `vector_query` (new)
 - `embeddings_status` -> skill `embeddings_status` -> tool `vector_stats` (new)
-- `fetch_urls` -> skill `fetch_urls` -> tools `fetch_url`, `write_file`, optional `llm_generate`
+- `fetch_urls` -> skill `fetch_urls` -> tools `fetch_url`, `write_file`
+- `summarize_documents` -> skill `summarize_documents` -> tools `read_file`, `write_file`, `summarize_document`, `update_rows`
 - `resummarize_documents` -> skill `resummarize_documents` -> tools `read_file`, `llm_generate`, `update_rows`
 - `index_docs` -> skill `index_documents_from_run` -> tool `index_document`
 - `create_idea` -> skill `create_idea` -> tools `write_file`, `index_idea`
@@ -29,6 +30,7 @@ If memory is lost: read `ARCHITECTURE_TARGET.md` first, then execute the Next St
 - `match_all_docs` -> skill `match_all_docs` -> tool `match_doc_to_ideas`
 - `match_single_idea` -> skill `match_single_idea` -> tool `match_idea_to_docs`
 - `match_single_doc` -> skill `match_single_doc` -> tool `match_doc_to_ideas`
+- `match_learning` -> skill `match_learning` -> tools `query_rows`, `read_file`, `write_file`, `persist_rows`
 - `judge_validity_report` -> skill `judge_validity` -> tool `judge_validity` + `write_file`
 - `build_dashboard` -> skill `build_dashboard` -> tool `build_dashboard`
 - `plan_match` -> skill `plan_match_execution` -> tool `plan_match_execution`

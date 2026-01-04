@@ -23,6 +23,9 @@ capabilities:
   - id: cap.llm_generate
     description: Generate text via local LLM (Ollama).
     default_tool: llm_generate
+  - id: cap.summarize_document
+    description: Summarize document content into title and summary.
+    default_tool: summarize_document
   - id: cap.ops_logging
     description: Record agent runs and tool calls.
     default_tool: ops_log

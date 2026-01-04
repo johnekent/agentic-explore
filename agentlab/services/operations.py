@@ -27,10 +27,12 @@ from agentlab.skills_runtime.operations_skills import (
     ListRuns as ListRunsSkill,
     ListSkills as ListSkillsSkill,
     LoadRun as LoadRunSkill,
+    MatchLearning as MatchLearningSkill,
     MatchAllDocs as MatchAllDocsSkill,
     MatchAllIdeas as MatchAllIdeasSkill,
     MatchSingleDoc as MatchSingleDocSkill,
     MatchSingleIdea as MatchSingleIdeaSkill,
+    SummarizeDocuments as SummarizeDocumentsSkill,
     PlanAssign as PlanAssignSkill,
     PlanBacklog as PlanBacklogSkill,
     PlanMatch as PlanMatchSkill,
@@ -437,6 +439,28 @@ def index_docs(ctx: OpsContext, run_id: str, workspace: Path) -> int:
     )
 
 
+def summarize_docs(
+    ctx: OpsContext,
+    run_id: str,
+    workspace: Path,
+    *,
+    prefer_chunking: bool = False,
+    overwrite: bool = False,
+) -> dict[str, int]:
+    run = load_run(ctx, workspace, run_id)
+    outputs = run.get("outputs") or {}
+    doc_paths = outputs.get("documents_created", [])
+    if not doc_paths:
+        return {"summarized": 0, "skipped": 0, "failed": 0}
+    return summarize_documents(
+        ctx,
+        doc_paths,
+        workspace,
+        prefer_chunking=prefer_chunking,
+        overwrite=overwrite,
+    )
+
+
 def index_documents(ctx: OpsContext, doc_paths: list[str], workspace: Path) -> dict[str, int]:
     orch = default_orchestrator()
     skill = IndexDocumentsSkill()
@@ -515,6 +539,50 @@ def match_single_doc(ctx: OpsContext, document_id: str, workspace: Path, top_n: 
         workspace=workspace,
         document_id=document_id,
         top_n=top_n,
+        agent_name=ctx.agent_name,
+        agent_type=ctx.agent_type,
+        parent_run_id=ctx.parent_run_id,
+    )
+
+def summarize_documents(
+    ctx: OpsContext,
+    doc_paths: list[str],
+    workspace: Path,
+    *,
+    prefer_chunking: bool = False,
+    overwrite: bool = False,
+    log_fn=None,
+) -> dict[str, int]:
+    orch = default_orchestrator()
+    skill = SummarizeDocumentsSkill()
+    return skill.run(
+        orch,
+        doc_paths=doc_paths,
+        workspace=workspace,
+        prefer_chunking=prefer_chunking,
+        overwrite=overwrite,
+        log_fn=log_fn,
+        agent_name=ctx.agent_name,
+        agent_type=ctx.agent_type,
+        parent_run_id=ctx.parent_run_id,
+    )
+
+def match_learning(
+    ctx: OpsContext,
+    workspace: Path,
+    *,
+    rules_path: Path | None = None,
+    high_threshold: int = 8,
+    low_threshold: int = 4,
+) -> dict[str, Any]:
+    orch = default_orchestrator()
+    skill = MatchLearningSkill()
+    return skill.run(
+        orch,
+        workspace=workspace,
+        rules_path=rules_path,
+        high_threshold=high_threshold,
+        low_threshold=low_threshold,
         agent_name=ctx.agent_name,
         agent_type=ctx.agent_type,
         parent_run_id=ctx.parent_run_id,

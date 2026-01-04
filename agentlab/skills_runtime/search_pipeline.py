@@ -8,7 +8,6 @@ from typing import Any
 
 from agentlab.core.frontmatter import dump_md_with_frontmatter
 from agentlab.core.paths import utc_now_iso
-from agentlab.pipeline.summarize import SYSTEM_SUMMARIZE
 from agentlab.pipeline.web import SearchHit, extract_readable_text
 from agentlab.skills_runtime.base import Skill, SkillSpec
 from agentlab.skills_runtime.ops_helpers import end_ops_run, log_item_processing, perf_span, start_ops_run, use_tool
@@ -103,15 +102,6 @@ class SearchWebSources(Skill):
             end_ops_run(orch, run_id=ops_run_id, status=status)
 
 
-def _parse_summary_json(text: str) -> dict[str, str]:
-    data = json.loads(text)
-    title = str(data.get("title") or "").strip()
-    summary = str(data.get("summary") or "").strip()
-    if title or summary:
-        return {"title": title, "summary": summary}
-    raise ValueError("Empty summary payload.")
-
-
 class FetchDocumentsFromRun(Skill):
     spec = SkillSpec(
         name="fetch_documents_from_run",
@@ -119,9 +109,7 @@ class FetchDocumentsFromRun(Skill):
             "cap.file_write",
             "cap.http_fetch",
             "cap.query_rows",
-            "cap.llm_generate",
             "cap.env_check_db",
-            "cap.env_check_llm",
             "cap.persistence",
             "cap.update_rows",
             "cap.ops_logging",
@@ -171,18 +159,6 @@ class FetchDocumentsFromRun(Skill):
                 )
                 if not env_db.ok:
                     raise RuntimeError(env_db.error)
-                env_llm = use_tool(
-                    orch,
-                    capability="cap.env_check_llm",
-                    run_id=ops_run_id,
-                    skill_name=self.spec.name,
-                    parameters={},
-                    timeout_s=2,
-                )
-                if not env_llm.ok:
-                    raise RuntimeError(env_llm.error)
-                if regenerate_summary and not env_llm.data.get("ready", False):
-                    raise RuntimeError({"code": "llm_unavailable", "message": "LLM provider not available."})
                 read_res = use_tool(
                     orch,
                     capability="cap.query_rows",
@@ -209,6 +185,28 @@ class FetchDocumentsFromRun(Skill):
                     url = c.get("url")
                     if not url:
                         continue
+                    already_fetched = False
+                    fetched_res = use_tool(
+                        orch,
+                        capability="cap.query_rows",
+                        run_id=ops_run_id,
+                        skill_name=self.spec.name,
+                        parameters={"url": url},
+                        sql=(
+                            "SELECT id FROM item_processing "
+                            "WHERE item_type = 'document' "
+                            "AND stage = 'fetch' "
+                            "AND status = 'success' "
+                            "AND metadata_json LIKE ? "
+                            "LIMIT 1"
+                        ),
+                        params=[f"%\"url\": \"{url}\"%"],
+                        db_path=str(Path(workspace) / "index" / "agent.db"),
+                    )
+                    if not fetched_res.ok:
+                        raise RuntimeError(fetched_res.error)
+                    if fetched_res.data.get("rows"):
+                        already_fetched = True
                     span_meta = {"url": url}
                     with perf_span(
                         orch,
@@ -218,6 +216,30 @@ class FetchDocumentsFromRun(Skill):
                         category="item",
                         metadata=span_meta,
                     ):
+                        if already_fetched:
+                            skipped += 1
+                            emit_status(
+                                orch,
+                                run_id=ops_run_id,
+                                skill_name=self.spec.name,
+                                message=f"Skipping already fetched {url}",
+                                stage="fetch",
+                            )
+                            log_item_processing(
+                                orch,
+                                run_id=ops_run_id,
+                                skill_name=self.spec.name,
+                                item_type="document",
+                                item_id=str(uuid.uuid4()),
+                                stage="fetch",
+                                status="skipped_already_fetched",
+                                db_path=str(Path(workspace) / "index" / "agent.db"),
+                                metadata={"url": url},
+                            )
+                            cand = candidates_by_url.get(url)
+                            if cand is not None:
+                                cand["status"] = "skipped_already_fetched"
+                            continue
                         dup_res = use_tool(
                             orch,
                             capability="cap.query_rows",
@@ -280,44 +302,8 @@ class FetchDocumentsFromRun(Skill):
                         text = extract_readable_text(fetch_res.data.get("text") or "")
                         title = str(c.get("title") or "")
                         summary = str(c.get("snippet") or "")
-                        summary_attempted = False
-                        if regenerate_summary or not (title and summary):
-                            summary_attempted = True
-                            prompt = text[:6000]
-                            prompt = f"URL: {url}\n\nCONTENT:\n{prompt}"
-                            llm_res = use_tool(
-                                orch,
-                                capability="cap.llm_generate",
-                                run_id=ops_run_id,
-                                skill_name=self.spec.name,
-                                parameters={"url": url},
-                                system=SYSTEM_SUMMARIZE,
-                                user=prompt,
-                                temperature=0.2,
-                            )
-                            if not llm_res.ok:
-                                failed += 1
-                                failed_urls.append(url)
-                                log_item_processing(
-                                    orch,
-                                    run_id=ops_run_id,
-                                    skill_name=self.spec.name,
-                                    item_type="document",
-                                    item_id=str(uuid.uuid4()),
-                                    stage="summary",
-                                    status="failed",
-                                    db_path=str(Path(workspace) / "index" / "agent.db"),
-                                    error=str(llm_res.error),
-                                    metadata={"url": url},
-                                )
-                                cand = candidates_by_url.get(url)
-                                if cand is not None:
-                                    cand["status"] = "summary_failed"
-                                    cand["error"] = llm_res.error
-                                continue
-                            llm_out = _parse_summary_json(str(llm_res.data.get("text") or ""))
-                            title = llm_out.get("title") or title
-                            summary = llm_out.get("summary") or summary
+                        if regenerate_summary:
+                            summary = ""
                         doc_id = str(uuid.uuid4())
                         span_meta["doc_id"] = doc_id
                         now = datetime.now()
@@ -390,16 +376,6 @@ class FetchDocumentsFromRun(Skill):
                             db_path=str(Path(workspace) / "index" / "agent.db"),
                             metadata={"url": url, "path": str(doc_path)},
                         )
-                        if summary_attempted:
-                            log_item_processing(
-                                orch,
-                                run_id=ops_run_id,
-                                skill_name=self.spec.name,
-                                item_type="document", item_id=doc_id,
-                                stage="summary",
-                                status="success",
-                                db_path=str(Path(workspace) / "index" / "agent.db"),
-                            )
                 outputs["documents_created"] = created
                 outputs["failed_urls"] = failed_urls
                 outputs["summary"] = {

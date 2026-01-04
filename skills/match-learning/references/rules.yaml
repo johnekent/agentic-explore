@@ -1,0 +1,6 @@
+version: 1
+last_updated: ""
+thresholds:
+  high_score: 8
+  low_score: 4
+rules: []
