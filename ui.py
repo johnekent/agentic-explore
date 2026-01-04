@@ -2,6 +2,15 @@ import json
 import streamlit as st
 import pandas as pd
 from pathlib import Path
+from agentlab.ui_helpers import (
+    build_row_key,
+    compute_fetch_status,
+    compute_index_status,
+    compute_summary_status,
+    eligible_fetch,
+    eligible_index,
+    eligible_summarize,
+)
 from agentlab.services.operations import (
     OpsContext,
     build_dashboard,
@@ -349,29 +358,19 @@ with tabs[0]:
         candidate_urls.add(url)
         fetch_info = fetch_by_url.get(url, {})
         doc_row = doc_by_url.get(url, {})
-        fetch_status = "not_fetched"
-        if fetch_info:
-            if fetch_info.get("status") == "success":
-                fetch_status = "fetched"
-            elif fetch_info.get("status") == "failed":
-                fetch_status = "fetch_failed"
-            else:
-                fetch_status = fetch_info.get("status") or "fetched"
-        elif doc_row:
-            fetch_status = "fetched"
+        fetch_status = compute_fetch_status(fetch_info, doc_row)
         doc_id = fetch_info.get("item_id") or doc_row.get("id")
-        summary_status = "not_summarized"
-        if doc_id in summary_success:
-            summary_status = "summarized"
-        elif doc_id in summary_failed:
-            summary_status = "summary_failed"
-        elif doc_row and str(doc_row.get("summary") or "").strip():
-            summary_status = "summarized"
-        index_status = "not_indexed"
-        if doc_id in index_success:
-            index_status = "indexed"
-        elif doc_id in index_failed:
-            index_status = "index_failed"
+        summary_status = compute_summary_status(
+            doc_id=doc_id,
+            summary_success=summary_success,
+            summary_failed=summary_failed,
+            doc_row=doc_row,
+        )
+        index_status = compute_index_status(
+            doc_id=doc_id,
+            index_success=index_success,
+            index_failed=index_failed,
+        )
         candidate_rows.append(
             {
                 "source_type": "url",
@@ -401,29 +400,19 @@ with tabs[0]:
             candidate_urls.add(url)
             fetch_info = fetch_by_url.get(url, {})
             doc_row = doc_by_url.get(url, {})
-            fetch_status = "not_fetched"
-            if fetch_info:
-                if fetch_info.get("status") == "success":
-                    fetch_status = "fetched"
-                elif fetch_info.get("status") == "failed":
-                    fetch_status = "fetch_failed"
-                else:
-                    fetch_status = fetch_info.get("status") or "fetched"
-            elif doc_row:
-                fetch_status = "fetched"
+            fetch_status = compute_fetch_status(fetch_info, doc_row)
             doc_id = fetch_info.get("item_id") or doc_row.get("id")
-            summary_status = "not_summarized"
-            if doc_id in summary_success:
-                summary_status = "summarized"
-            elif doc_id in summary_failed:
-                summary_status = "summary_failed"
-            elif doc_row and str(doc_row.get("summary") or "").strip():
-                summary_status = "summarized"
-            index_status = "not_indexed"
-            if doc_id in index_success:
-                index_status = "indexed"
-            elif doc_id in index_failed:
-                index_status = "index_failed"
+            summary_status = compute_summary_status(
+                doc_id=doc_id,
+                summary_success=summary_success,
+                summary_failed=summary_failed,
+                doc_row=doc_row,
+            )
+            index_status = compute_index_status(
+                doc_id=doc_id,
+                index_success=index_success,
+                index_failed=index_failed,
+            )
             candidate_rows.append(
                 {
                     "source_type": "url",
@@ -446,14 +435,17 @@ with tabs[0]:
         source_type = "file" if not url else "url"
         fetch_status = "uploaded" if not url else "fetched"
         doc_id = d.get("id")
-        summary_status = "not_summarized"
-        if doc_id in summary_success:
-            summary_status = "summarized"
-        elif doc_id in summary_failed:
-            summary_status = "summary_failed"
-        elif str(d.get("summary") or "").strip():
-            summary_status = "summarized"
-        index_status = "indexed" if doc_id in index_success else "not_indexed"
+        summary_status = compute_summary_status(
+            doc_id=doc_id,
+            summary_success=summary_success,
+            summary_failed=summary_failed,
+            doc_row=d,
+        )
+        index_status = compute_index_status(
+            doc_id=doc_id,
+            index_success=index_success,
+            index_failed=index_failed,
+        )
         extra_rows.append(
             {
                 "source_type": source_type,
@@ -498,30 +490,36 @@ with tabs[0]:
                 key="sources_index_filter",
             )
         sources_df = sources_df.copy()
-        sources_df["row_key"] = (
-            sources_df["source_type"].astype(str)
-            + "|"
-            + sources_df["url_or_path"].astype(str)
-            + "|"
-            + sources_df["run_id"].astype(str)
-            + "|"
-            + sources_df["content_path"].astype(str)
+        sources_df["row_key"] = sources_df.apply(
+            lambda row: build_row_key(
+                source_type=str(row.get("source_type") or ""),
+                url_or_path=str(row.get("url_or_path") or ""),
+                run_id=str(row.get("run_id") or ""),
+                content_path=str(row.get("content_path") or ""),
+            ),
+            axis=1,
         )
         filtered = sources_df[
             sources_df["fetch_status"].isin(fetch_filter_vals)
             & sources_df["summary_status"].isin(summary_filter_vals)
             & sources_df["index_status"].isin(index_filter_vals)
         ].copy()
-        eligible_fetch = filtered["fetch_status"].isin(["not_fetched", "fetch_failed"])
-        eligible_summarize = (
-            filtered["fetch_status"].isin(["fetched", "skipped_already_fetched", "uploaded"])
-            & filtered["summary_status"].isin(["not_summarized", "summary_failed"])
-            & filtered["content_path"].astype(str).str.len().gt(0)
+        eligible_fetch_mask = filtered["fetch_status"].map(eligible_fetch)
+        eligible_summarize_mask = filtered.apply(
+            lambda row: eligible_summarize(
+                str(row.get("fetch_status") or ""),
+                str(row.get("summary_status") or ""),
+                str(row.get("content_path") or ""),
+            ),
+            axis=1,
         )
-        eligible_index = (
-            filtered["summary_status"].eq("summarized")
-            & filtered["index_status"].isin(["not_indexed", "index_failed"])
-            & filtered["content_path"].astype(str).str.len().gt(0)
+        eligible_index_mask = filtered.apply(
+            lambda row: eligible_index(
+                str(row.get("summary_status") or ""),
+                str(row.get("index_status") or ""),
+                str(row.get("content_path") or ""),
+            ),
+            axis=1,
         )
         selection_state = st.session_state.get("sources_selection", {})
         filtered.insert(
@@ -545,13 +543,15 @@ with tabs[0]:
                 lambda key: bool(selection_state.get(key, {}).get("index", False))
             ),
         )
-        filtered["fetch_action"] = eligible_fetch.map(lambda ok: "eligible" if ok else "locked")
-        filtered["summary_action"] = eligible_summarize.map(lambda ok: "eligible" if ok else "locked")
-        filtered["index_action"] = eligible_index.map(lambda ok: "eligible" if ok else "locked")
+        filtered["fetch_action"] = eligible_fetch_mask.map(lambda ok: "eligible" if ok else "locked")
+        filtered["summary_action"] = eligible_summarize_mask.map(
+            lambda ok: "eligible" if ok else "locked"
+        )
+        filtered["index_action"] = eligible_index_mask.map(lambda ok: "eligible" if ok else "locked")
         select_fetch_col, select_sum_col, select_index_col = st.columns(3)
         with select_fetch_col:
             if st.button("Select all unfetched", key="sources_select_all_fetch"):
-                for row_key, is_eligible in zip(filtered["row_key"], eligible_fetch):
+                for row_key, is_eligible in zip(filtered["row_key"], eligible_fetch_mask):
                     selection_state[row_key] = {
                         "fetch": bool(is_eligible),
                         "summarize": bool(selection_state.get(row_key, {}).get("summarize", False)),
@@ -561,7 +561,7 @@ with tabs[0]:
                 st.rerun()
         with select_sum_col:
             if st.button("Select all unsummarized", key="sources_select_all_summarize"):
-                for row_key, is_eligible in zip(filtered["row_key"], eligible_summarize):
+                for row_key, is_eligible in zip(filtered["row_key"], eligible_summarize_mask):
                     selection_state[row_key] = {
                         "fetch": bool(selection_state.get(row_key, {}).get("fetch", False)),
                         "summarize": bool(is_eligible),
@@ -571,7 +571,7 @@ with tabs[0]:
                 st.rerun()
         with select_index_col:
             if st.button("Select all unindexed", key="sources_select_all_index"):
-                for row_key, is_eligible in zip(filtered["row_key"], eligible_index):
+                for row_key, is_eligible in zip(filtered["row_key"], eligible_index_mask):
                     selection_state[row_key] = {
                         "fetch": bool(selection_state.get(row_key, {}).get("fetch", False)),
                         "summarize": bool(selection_state.get(row_key, {}).get("summarize", False)),
@@ -598,14 +598,11 @@ with tabs[0]:
         )
         updated_selection = {}
         for _, row in edited.iterrows():
-            row_key = (
-                str(row.get("source_type"))
-                + "|"
-                + str(row.get("url_or_path"))
-                + "|"
-                + str(row.get("run_id"))
-                + "|"
-                + str(row.get("content_path"))
+            row_key = build_row_key(
+                source_type=str(row.get("source_type") or ""),
+                url_or_path=str(row.get("url_or_path") or ""),
+                run_id=str(row.get("run_id") or ""),
+                content_path=str(row.get("content_path") or ""),
             )
             updated_selection[row_key] = {
                 "fetch": bool(row.get("select_fetch"))

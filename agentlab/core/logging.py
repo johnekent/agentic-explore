@@ -5,8 +5,19 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from agentlab.core.config import get_setting
 from agentlab.core.paths import ensure_workspace, utc_now_iso
 from agentlab.db.db import connect, apply_migrations_from_dir, with_retry
+
+
+def _resolve_db_path(db_path: Path | None) -> Path:
+    if db_path is not None:
+        return db_path
+    env_path = get_setting("AGENTLAB_DB_PATH", "").strip()
+    if env_path:
+        return Path(env_path)
+    ws = ensure_workspace(Path("workspace"))
+    return ws.db_path
 
 
 def log_usage(
@@ -19,10 +30,8 @@ def log_usage(
     db_path: str | None = None,
 ):
     """Log skill usage for operational dashboard."""
-    if db_path is None:
-        ws = ensure_workspace(Path("workspace"))
-        db_path = str(ws.db_path)
-    con = connect(Path(db_path))
+    resolved = _resolve_db_path(Path(db_path) if db_path is not None else None)
+    con = connect(resolved)
     apply_migrations_from_dir(con, Path("db/migrations"))
     log_id = str(uuid.uuid4())
     timestamp = utc_now_iso()
@@ -49,10 +58,8 @@ def start_run(
     metadata: dict[str, Any] | None = None,
     db_path: Path | None = None,
 ) -> str:
-    if db_path is None:
-        ws = ensure_workspace(Path("workspace"))
-        db_path = ws.db_path
-    con = connect(db_path)
+    resolved = _resolve_db_path(db_path)
+    con = connect(resolved)
     apply_migrations_from_dir(con, Path("db/migrations"))
     run_id = str(uuid.uuid4())
     with_retry(
@@ -87,10 +94,8 @@ def start_run(
 
 
 def end_run(run_id: str, *, status: str = "completed", db_path: Path | None = None) -> None:
-    if db_path is None:
-        ws = ensure_workspace(Path("workspace"))
-        db_path = ws.db_path
-    con = connect(db_path)
+    resolved = _resolve_db_path(db_path)
+    con = connect(resolved)
     apply_migrations_from_dir(con, Path("db/migrations"))
     with_retry(
         lambda: con.execute(
@@ -112,10 +117,8 @@ def log_tool_call(
     duration_ms: int | None = None,
     db_path: Path | None = None,
 ) -> None:
-    if db_path is None:
-        ws = ensure_workspace(Path("workspace"))
-        db_path = ws.db_path
-    con = connect(db_path)
+    resolved = _resolve_db_path(db_path)
+    con = connect(resolved)
     apply_migrations_from_dir(con, Path("db/migrations"))
     call_id = str(uuid.uuid4())
     with_retry(
@@ -181,10 +184,8 @@ def log_interaction(
     details: dict[str, Any] | None = None,
     db_path: Path | None = None,
 ) -> None:
-    if db_path is None:
-        ws = ensure_workspace(Path("workspace"))
-        db_path = ws.db_path
-    con = connect(db_path)
+    resolved = _resolve_db_path(db_path)
+    con = connect(resolved)
     apply_migrations_from_dir(con, Path("db/migrations"))
     interaction_id = str(uuid.uuid4())
     with_retry(
@@ -214,10 +215,8 @@ def log_span(
     parent_span_id: str | None = None,
     db_path: Path | None = None,
 ) -> None:
-    if db_path is None:
-        ws = ensure_workspace(Path("workspace"))
-        db_path = ws.db_path
-    con = connect(db_path)
+    resolved = _resolve_db_path(db_path)
+    con = connect(resolved)
     apply_migrations_from_dir(con, Path("db/migrations"))
     span_id = str(uuid.uuid4())
     with_retry(
