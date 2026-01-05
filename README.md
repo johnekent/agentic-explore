@@ -159,8 +159,8 @@ This project follows `GUIDING_PRINCIPLES.md`:
  - Interfaces (CLI/UI/MCP) call services; services call skills; skills call tools
 
 See:
-- `ARCHITECTURE_TARGET.md` for the target tool/skill/agent set
-- `MIGRATION_PLAN.md` for the refactor status and next steps
+- `PROJECT_ARCHITECTURE.md` for the consolidated project overview, architecture, and roadmap
+- `GUIDING_PRINCIPLES.md` for the architectural rules
 
 ## Planning & Execution Tracking
 After reviewing matches, create and manage tasks for execution:
