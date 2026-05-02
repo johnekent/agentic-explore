@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hallways & Perspectives</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="game">
+    <header>
+      <h1>Hallways & Perspectives</h1>
+      <p>Arrange hallway slices into the correct <strong>top / bottom / left / right</strong> positions.</p>
+    </header>
+
+    <section class="controls">
+      <label for="mode">Style:</label>
+      <select id="mode">
+        <option value="generated">Generated (B/W clean lines)</option>
+        <option value="prepared-1">Prepared: Gallery Hall</option>
+        <option value="prepared-2">Prepared: Metro Hall</option>
+      </select>
+      <button id="new-round">New Round</button>
+      <span id="status" aria-live="polite"></span>
+    </section>
+
+    <section class="board-wrap">
+      <div class="target" id="target" aria-label="Perspective target area">
+        <div class="slot" data-slot="top">TOP</div>
+        <div class="slot" data-slot="left">LEFT</div>
+        <div class="center">CENTER</div>
+        <div class="slot" data-slot="right">RIGHT</div>
+        <div class="slot" data-slot="bottom">BOTTOM</div>
+      </div>
+      <div class="tray" id="tray" aria-label="Puzzle tray"></div>
+    </section>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
